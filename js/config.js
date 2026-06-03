@@ -13,8 +13,8 @@ export const PLAYER_HEIGHT = 1.72; // camera eye height
 export const PLAYER_RADIUS = 0.42; // collision cylinder radius
 export const PLAYER_SPEED  = 7.5;  // world units / second
 export const SPRINT_MULT   = 1.65;
-export const GRAVITY       = 16;
-export const JUMP_FORCE    = 6.2;
+export const GRAVITY       = 20;
+export const JUMP_FORCE    = 5.0;
 
 // ─── COMBAT ──────────────────────────────────────────────────
 export const REGEN_DELAY   = 5500;  // ms without damage before regen starts
@@ -35,8 +35,8 @@ export const WEAPONS = {
     pellets:     1,
     automatic:   true,
     zoom:        1.2,
-    recoilZ:     0.028,
-    recoilRotX:  0.055,
+    recoilZ:     0.022,
+    recoilRotX:  0.05,
     barrelColor: 0x1a1a1a,
     bodyColor:   0x252525,
   },
@@ -51,8 +51,8 @@ export const WEAPONS = {
     pellets:     8,
     automatic:   false,
     zoom:        1.0,
-    recoilZ:     0.08,
-    recoilRotX:  0.14,
+    recoilZ:     0.038,
+    recoilRotX:  0.07,
     barrelColor: 0x2a1800,
     bodyColor:   0x3a2800,
   },
@@ -67,8 +67,8 @@ export const WEAPONS = {
     pellets:     1,
     automatic:   false,
     zoom:        4.0,
-    recoilZ:     0.10,
-    recoilRotX:  0.18,
+    recoilZ:     0.045,
+    recoilRotX:  0.09,
     barrelColor: 0x111111,
     bodyColor:   0x1c2418,
   },

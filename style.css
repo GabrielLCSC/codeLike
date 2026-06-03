@@ -204,9 +204,6 @@ html, body {
 .stat-fill { height: 100%; background: var(--green); border-radius: 2px; }
 
 /* ─── BOT COUNT STEPPER ──────────────────────────────────── */
-.solo-only { display: none; }
-#screen-loadout.is-solo .solo-only { display: flex; }
-
 .bot-count-row {
   align-items: center; gap: 24px;
   margin-bottom: 4px;
@@ -356,6 +353,10 @@ html, body {
   position: absolute; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   width: 24px; height: 24px;
+  transition: transform 0.12s ease;
+}
+#crosshair.aiming {
+  transform: translate(-50%, -50%) scale(0.38);
 }
 #crosshair .ch-t, #crosshair .ch-b, #crosshair .ch-l, #crosshair .ch-r {
   position: absolute; background: rgba(255,255,255,0.9);
@@ -614,6 +615,40 @@ html, body {
   transform: translate(-50%, -50%);
   width: 4px; height: 4px;
   border-radius: 50%; background: rgba(255,0,0,0.6);
+}
+
+/* ─── SCORE POPUPS ───────────────────────────────────────── */
+@keyframes scoreFloat {
+  0%   { opacity: 1;   transform: translateX(-50%) translateY(0);    }
+  100% { opacity: 0;   transform: translateX(-50%) translateY(-70px); }
+}
+.score-popup {
+  position: fixed;
+  left: 50%; top: calc(50% + 36px);
+  transform: translateX(-50%);
+  font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+  color: #ffffff; letter-spacing: 3px;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.9);
+  pointer-events: none; z-index: 56;
+  animation: scoreFloat 0.95s ease-out forwards;
+}
+.score-popup--kill { color: #ff4444; text-shadow: 0 0 12px rgba(255,60,60,0.6); }
+
+/* ─── MEDAL OVERLAY ──────────────────────────────────────── */
+@keyframes medalPop {
+  0%   { opacity: 0; transform: translateX(-50%) scale(0.55); }
+  14%  { opacity: 1; transform: translateX(-50%) scale(1.08); }
+  24%  { transform: translateX(-50%) scale(1.00); }
+  72%  { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-50%) scale(0.95); }
+}
+#medal-display {
+  position: fixed; left: 50%; top: 7%;
+  transform: translateX(-50%);
+  width: 200px; height: auto;
+  pointer-events: none; z-index: 57;
+  animation: medalPop 3.2s ease-out forwards;
+  filter: drop-shadow(0 4px 16px rgba(0,0,0,0.7));
 }
 
 /* ─── LOADING ────────────────────────────────────────────── */

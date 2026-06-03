@@ -160,13 +160,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Bot count stepper ────────────────────────────────
   function updateBotCountUI() {
-    document.getElementById('lbl-bot-count').textContent = settings.botCount;
+    document.getElementById('lbl-bot-count').textContent =
+      settings.botCount === 0 ? 'OFF' : settings.botCount;
   }
   updateBotCountUI();
 
   document.getElementById('btn-bots-minus').addEventListener('click', e => {
     e.stopPropagation();
-    if (settings.botCount > 1) { settings.botCount--; updateBotCountUI(); saveSettings(settings); }
+    if (settings.botCount > 0) { settings.botCount--; updateBotCountUI(); saveSettings(settings); }
   });
   document.getElementById('btn-bots-plus').addEventListener('click', e => {
     e.stopPropagation();
@@ -177,14 +178,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-solo').addEventListener('click', () => {
     pendingMode = 'solo';
     setupGunCards();
-    document.getElementById('screen-loadout').classList.add('is-solo');
     showScreen('screen-loadout');
   });
 
   document.getElementById('btn-multiplayer').addEventListener('click', () => {
     pendingMode = 'multi';
     setupGunCards();
-    document.getElementById('screen-loadout').classList.remove('is-solo');
     showScreen('screen-loadout');
   });
 

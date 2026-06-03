@@ -32,6 +32,11 @@ const SOUND_FILES = {
   ui_hover:      'sounds/ui/ui_hover.mp3',
   ui_click:      'sounds/ui/ui_click.mp3',
   kill_confirm:  'sounds/ui/kill_confirm.mp3',
+
+  // ── Medal achievements — drop files in sounds/medals/ ────
+  medal_3:       'sounds/medals/medal_3.mp3',
+  medal_5:       'sounds/medals/medal_5.mp3',
+  medal_10:      'sounds/medals/medal_10.mp3',
 };
 
 class SoundManager {

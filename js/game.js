@@ -1,20 +1,24 @@
 // ═══════════════════════════════════════════════════════════
-//  WARFRONT — Main Game class
-//  Handles: rendering, player movement, weapons, physics,
-//           bots, remote players, HUD, minimap, death/respawn
+//  WARFRONT — Game (orchestrator)
+//  Owns: Three.js renderer/scene/camera, player physics,
+//        combat, bot + remote-player coordination, input.
+//  Delegates to: HUD, WeaponSystem, ParticleSystem.
 // ═══════════════════════════════════════════════════════════
 
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import {
-  CELL_SIZE, WALL_HEIGHT,
-  PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT, GRAVITY, JUMP_FORCE,
-  REGEN_DELAY, REGEN_RATE, RESPAWN_TIME, HEADSHOT_MULT, WEAPONS,
-  BOT_COUNT, SYNC_INTERVAL,
+  PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
+  GRAVITY, JUMP_FORCE,
+  REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
+  HEADSHOT_MULT, WEAPONS, BOT_COUNT, SYNC_INTERVAL,
 } from './config.js';
-import { MapGenerator } from './mapgen.js';
-import { Bot }          from './bot.js';
-import { sound }        from './sound.js';
+import { MapGenerator }  from './mapgen.js';
+import { Bot }           from './bot.js';
+import { sound }         from './sound.js';
+import { HUD }           from './hud.js';
+import { WeaponSystem }  from './weapon.js';
+import { ParticleSystem } from './particles.js';
 
 export class Game {
   /**
@@ -23,8 +27,10 @@ export class Game {
    *   weapon:      string,
    *   sensitivity: number,
    *   fov:         number,
+   *   adsMode:     'toggle'|'hold',
    *   username:    string,
-   *   mp?:         import('./multiplayer.js').MultiplayerManager
+   *   botCount?:   number,
+   *   mp?:         import('./multiplayer.js').MultiplayerManager,
    * }} opts
    */
   constructor(opts) {
@@ -33,118 +39,82 @@ export class Game {
     this.mp       = opts.mp || null;
     this.username = opts.username || 'Ghost';
 
-    // ── Three.js ─────────────────────────────────────────
-    /** @type {THREE.WebGLRenderer} */ this.renderer = null;
-    /** @type {THREE.Scene}         */ this.scene    = null;
-    /** @type {THREE.PerspectiveCamera} */ this.camera = null;
-    /** @type {PointerLockControls} */ this.controls  = null;
+    // ── Three.js ──────────────────────────────────────────
+    /** @type {THREE.WebGLRenderer}      */ this.renderer = null;
+    /** @type {THREE.Scene}              */ this.scene    = null;
+    /** @type {THREE.PerspectiveCamera}  */ this.camera   = null;
+    /** @type {PointerLockControls}      */ this.controls = null;
+    /** @type {MapGenerator}             */ this.map      = null;
 
-    // ── State ─────────────────────────────────────────────
-    this.running  = false;
-    this.alive    = true;
-    this.health   = 100;
-    this.kills    = 0;
-    this.deaths   = 0;
+    // ── Player state ──────────────────────────────────────
+    this.running = false;
+    this.alive   = true;
+    this.health  = 100;
+    this.kills   = 0;
+    this.deaths  = 0;
 
-    // ── Weapon ────────────────────────────────────────────
-    this.weaponKey = opts.weapon;
-    this.wDef      = WEAPONS[opts.weapon];
-    this.ammo      = this.wDef.magSize;
-    this.reserve   = this.wDef.reserve;
-    this.reloading = false;
-    this._reloadTimer = null;
-    this.lastShotMs   = -9999;
-    this.isADS        = false;
-    this.targetFov    = opts.fov;
+    // ── Physics ───────────────────────────────────────────
+    this.velY      = 0;
+    this.onGround  = true;
+    this.isMoving  = false;
+    this._airVelX  = 0;   // horizontal momentum locked at jump takeoff
+    this._airVelZ  = 0;
+
+    // ── Combat ────────────────────────────────────────────
+    this._hitShake     = 0;   // 0–1, camera jitter when hit
+    this._killStreak   = 0;   // resets on death; drives kill-confirm pitch
+    /** @type {Set<string>} UIDs we've shot recently (multiplayer kill confirm) */
+    this._recentlyShot = new Set();
+
+    // ── Timing ────────────────────────────────────────────
+    this.lastFrameMs      = performance.now();
+    this.lastDamageMs     = -9999;
+    this.lastSyncMs       = -9999;
+    this.damageFlashTimer = 0;
+
+    // ── Scene objects ─────────────────────────────────────
+    /** @type {Bot[]} */ this.bots = [];
+    /** @type {Map<string,{mesh:THREE.Group, data:object, targetPos:THREE.Vector3, targetRotY:number}>} */
+    this.remotePlayers = new Map();
+
+    // ── Systems (created in start()) ──────────────────────
+    /** @type {HUD}            */ this.hud       = null;
+    /** @type {WeaponSystem}   */ this.weapon    = null;
+    /** @type {ParticleSystem} */ this.particles = null;
 
     // ── Input ─────────────────────────────────────────────
     this.keys      = new Set();
     this.mouseDown = false;
 
-    // ── Physics ───────────────────────────────────────────
-    this.velY     = 0;
-    this.onGround = true;
-    this.isMoving = false;
-
-    // ── Visual ────────────────────────────────────────────
-    this.bobPhase   = 0;
-    this.recoilZ    = 0;
-    this.recoilRotX = 0;
-    this.damageFlashTimer = 0;
-
-    // ── Scene objects ─────────────────────────────────────
-    /** @type {Bot[]} */            this.bots           = [];
-    /** @type {Map<string,{mesh:THREE.Group, data:object, targetPos:THREE.Vector3}>} */
-    this.remotePlayers = new Map();
-    /** @type {THREE.Group} */      this.weaponGroup    = null;
-    /** @type {THREE.Mesh} */       this.muzzleFlash    = null;
-    this._flashOff = null;
-
-    // ── Map ───────────────────────────────────────────────
-    /** @type {MapGenerator} */     this.map = null;
-
-    // ── Minimap ───────────────────────────────────────────
-    this._mmCanvas = null;
-    this._mmCtx    = null;
-
-    // ── Timing ────────────────────────────────────────────
-    this.lastFrameMs   = performance.now();
-    this.lastDamageMs  = -9999;
-    this.lastSyncMs    = -9999;
-
-    // ── Raycaster ─────────────────────────────────────────
+    // Raycaster shared across all shots
     this.raycaster = new THREE.Raycaster();
     this.raycaster.far = 80;
 
-    // ── Hit shake ─────────────────────────────────────────
-    this._hitShake = 0;   // 0–1, decays each frame
-
-    // ── Multiplayer kill tracking ──────────────────────────
-    /** @type {Set<string>} uids we've shot recently */
-    this._recentlyShot = new Set();
-
-    // ── Kill streak (resets on death, caps pitch at 5) ────
-    this._killStreak = 0;
-
-    // ── Reload animation ──────────────────────────────────
-    this._reloadAnimT      = 0;   // 0→1 progress
-    this._reloadAnimActive = false;
-
-    // ── Bullet impact particles ────────────────────────────
-    /** @type {{mesh:THREE.Mesh, vel:THREE.Vector3, life:number}[]} */
-    this._impactParticles = [];
-
-    // ── Bound event handlers (for cleanup) ────────────────
+    // Bound handlers stored for clean removal
     this._onKeyDown  = this._handleKeyDown.bind(this);
     this._onKeyUp    = this._handleKeyUp.bind(this);
     this._onMouseDn  = this._handleMouseDown.bind(this);
     this._onMouseUp  = this._handleMouseUp.bind(this);
     this._onCtxMenu  = e => e.preventDefault();
-    this._onRMB      = this._handleRMB.bind(this);
     this._onResize   = this._handleResize.bind(this);
   }
 
   // ═══════════════════════════════════════════════════════
-  //  STARTUP
+  //  PUBLIC API
   // ═══════════════════════════════════════════════════════
+
   start() {
-    this._setupRenderer();
-    this._setupScene();
-    this._buildMap();
-    this._setupPlayer();
-    this._setupWeapon();
-    this._setupInput();
-    this._setupHUD();
+    this._initRenderer();
+    this._initScene();
+    this._initMap();
+    this._initPlayer();
+    this._initSystems();
+    this._bindInput();
 
-    if (this.mode === 'solo') {
-      this._spawnBots(this.opts.botCount ?? BOT_COUNT);
-    }
+    if ((this.opts.botCount ?? 0) > 0) this._spawnBots(this.opts.botCount);
+    if (this.mp)              this._setupMultiplayer();
 
-    if (this.mp) {
-      this._setupMultiplayer();
-    }
-
-    document.getElementById('hud').classList.remove('hidden');
+    this.hud.show();
     document.getElementById('pointer-lock-overlay').classList.remove('hidden');
     this.running = true;
     this._loop();
@@ -153,65 +123,72 @@ export class Game {
   stop() {
     this.running = false;
     this.controls?.unlock();
-    this._removeInput();
-    this.bots.forEach(b => { if (b.mesh) this.scene.remove(b.mesh); });
-    this.remotePlayers.forEach(({ mesh }) => { if (mesh) this.scene.remove(mesh); });
+    this._unbindInput();
+    this.bots.forEach(b => this.scene?.remove(b.mesh));
+    this.remotePlayers.forEach(({ mesh }) => this.scene?.remove(mesh));
+    this.particles?.dispose();
     this.renderer?.dispose();
     this.scene = null;
-    if (this.mp) this.mp.leave();
-    document.getElementById('hud').classList.add('hidden');
+    this.mp?.leave();
+    this.hud?.hide();
+
     document.getElementById('pointer-lock-overlay').classList.add('hidden');
     document.getElementById('death-screen').classList.add('hidden');
     document.getElementById('scope-overlay').classList.add('hidden');
     document.getElementById('crosshair').classList.remove('hidden');
   }
 
+  /** Called from in-game pause panel. */
+  changeWeapon(key) {
+    this.weapon.equip(key);     // equip() calls setADS(false) internally
+    this._applyADSState(false);
+  }
+
+  /** Called from in-game pause panel. */
+  setSensitivity(value) {
+    this.opts.sensitivity = value;
+    if (this.controls) this.controls.pointerSpeed = value * 0.42;
+  }
+
   // ═══════════════════════════════════════════════════════
-  //  SETUP HELPERS
+  //  INIT HELPERS
   // ═══════════════════════════════════════════════════════
-  _setupRenderer() {
-    this.canvas = document.getElementById('game-canvas');
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+
+  _initRenderer() {
+    const canvas = document.getElementById('game-canvas');
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
     window.addEventListener('resize', this._onResize);
   }
 
-  _setupScene() {
+  _initScene() {
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0x12121c, 0.022);
+    this.scene.fog        = new THREE.FogExp2(0x12121c, 0.022);
     this.scene.background = new THREE.Color(0x08080f);
-
     this.camera = new THREE.PerspectiveCamera(
       this.opts.fov,
       window.innerWidth / window.innerHeight,
-      0.08, 120
+      0.08, 120,
     );
   }
 
-  _buildMap() {
+  _initMap() {
     this.map = new MapGenerator().generate();
     this.map.buildScene(this.scene);
-
-    this._mmCanvas = document.getElementById('minimap');
-    this._mmCtx    = this._mmCanvas.getContext('2d');
-    this._mmCanvas.width  = 150;
-    this._mmCanvas.height = 150;
   }
 
-  _setupPlayer() {
+  _initPlayer() {
     this.controls = new PointerLockControls(this.camera, this.renderer.domElement);
     this.controls.pointerSpeed = this.opts.sensitivity * 0.42;
     this.scene.add(this.camera);
 
-    // Spawn at random room centre
-    const sp = this.map.spawnPoints;
+    const sp   = this.map.spawnPoints;
     const pick = sp[Math.floor(Math.random() * sp.length)];
     this.camera.position.set(pick.x, PLAYER_HEIGHT, pick.z);
 
-    // Pointer lock events
     const plo = document.getElementById('pointer-lock-overlay');
     plo.addEventListener('click', () => {
       if (this.alive && this.running) this.controls.lock();
@@ -219,71 +196,44 @@ export class Game {
 
     this.controls.addEventListener('lock', () => {
       plo.classList.add('hidden');
-      // After first lock: title becomes "PAUSED" so in-game panel context is clear
       const title = document.getElementById('plo-title');
       if (title) title.textContent = 'PAUSED';
       sound.init();
     });
     this.controls.addEventListener('unlock', () => {
-      if (this.alive && this.running) {
-        plo.classList.remove('hidden');
-      }
+      if (this.alive && this.running) plo.classList.remove('hidden');
     });
 
-    // Auto-lock on start
     setTimeout(() => this.controls.lock(), 200);
   }
 
-  _setupWeapon() {
-    this.weaponGroup = this._buildGunModel(this.weaponKey);
-    this.weaponGroup.position.set(0.22, -0.28, -0.46);
-    this.camera.add(this.weaponGroup);
+  _initSystems() {
+    // HUD
+    this.hud = new HUD(
+      this.username,
+      this.mode === 'multi' && this.mp ? this.mp.roomCode : '',
+    );
+    this.hud.setHealth(this.health);
+    this.hud.setScore(this.kills, this.deaths);
 
-    // Muzzle flash
-    const flashGeo  = new THREE.SphereGeometry(0.05, 6, 6);
-    const flashMat  = new THREE.MeshBasicMaterial({ color: 0xffdd44 });
-    const flashMesh = new THREE.Mesh(flashGeo, flashMat);
-    const flashLight = new THREE.PointLight(0xffaa00, 4, 2.5);
-    this.muzzleFlash = new THREE.Group();
-    this.muzzleFlash.add(flashMesh, flashLight);
-    this.muzzleFlash.position.set(0, 0, -0.62);
-    this.muzzleFlash.visible = false;
-    this.weaponGroup.add(this.muzzleFlash);
-  }
+    // WeaponSystem — wire callbacks so it drives HUD updates
+    this.weapon = new WeaponSystem(
+      this.camera, this.opts.weapon, this.opts.fov, this.opts.adsMode,
+    );
+    this.weapon.onAmmoChanged    = () => this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve);
+    this.weapon.onWeaponChanged  = name => this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve, name);
+    this.weapon.onReloadStart    = () => this.hud.showReloadBar(this.weapon.def.reloadTime);
+    this.weapon.onReloadComplete = () => this.hud.hideReloadBar();
+    this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve, this.weapon.def.name);
 
-  _setupInput() {
-    document.addEventListener('keydown',   this._onKeyDown);
-    document.addEventListener('keyup',     this._onKeyUp);
-    document.addEventListener('mousedown', this._onMouseDn);
-    document.addEventListener('mouseup',   this._onMouseUp);
-    document.addEventListener('contextmenu', this._onCtxMenu);
-  }
-
-  _removeInput() {
-    document.removeEventListener('keydown',      this._onKeyDown);
-    document.removeEventListener('keyup',        this._onKeyUp);
-    document.removeEventListener('mousedown',    this._onMouseDn);
-    document.removeEventListener('mouseup',      this._onMouseUp);
-    document.removeEventListener('contextmenu',  this._onCtxMenu);
-    window.removeEventListener('resize',         this._onResize);
-  }
-
-  _setupHUD() {
-    document.getElementById('hud-weapon-name').textContent = this.wDef.name;
-    document.getElementById('hud-ammo-mag').textContent    = this.ammo;
-    document.getElementById('hud-ammo-reserve').textContent = this.reserve;
-    if (this.mode === 'multi' && this.mp) {
-      document.getElementById('hud-room-tag').textContent = `· ${this.mp.roomCode}`;
-    }
-    this._updateHealthHUD();
-    this._updateScoreHUD();
+    // Particles
+    this.particles = new ParticleSystem(this.scene);
   }
 
   _spawnBots(count) {
     const sp = this.map.spawnPoints;
     for (let i = 0; i < count; i++) {
-      const pick = sp[(i + 1) % sp.length]; // avoid first spawn (player's)
-      this.bots.push(new Bot(this.scene, pick, this.map, i));
+      this.bots.push(new Bot(this.scene, sp[(i + 1) % sp.length], this.map, i));
     }
   }
 
@@ -291,34 +241,26 @@ export class Game {
     this.mp.onPlayerUpdate = (uid, data) => {
       if (this.remotePlayers.has(uid)) {
         const rp = this.remotePlayers.get(uid);
-        // Kill confirmation + corpse when they just died
+
         if (rp.data.alive && !data.alive) {
-          // Leave a corpse at their last position
-          const corpse = this._createCorpseMesh(rp.mesh.position, rp.mesh.rotation.y, 0x0055cc);
+          // Drop a corpse at last known position
+          const corpse = this._makeCorpse(rp.mesh.position, rp.mesh.rotation.y, 0x0055cc);
           this.scene.add(corpse);
-          let t = 0;
-          const iv = setInterval(() => {
-            t += 0.1;
-            if (t > 5) corpse.material.opacity = Math.max(0, 1 - (t - 5) / 3);
-            if (t >= 8) { clearInterval(iv); this.scene.remove(corpse); corpse.material.dispose(); }
-          }, 100);
+          this._fadeAndRemove(corpse, 5, 8);
 
           if (this._recentlyShot.has(uid)) {
-            this._killStreak++;
-            sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
-            this.kills++;
-            this._updateScoreHUD();
-            this._addKillFeed(this.username, data.name ?? 'Player');
+            this._onKill(data.name ?? 'Player');
             this._recentlyShot.delete(uid);
-            if (this.mp) this.mp.updateKills(this.kills, this.deaths);
+            this.mp?.updateKills(this.kills, this.deaths);
           }
         }
-        rp.data = data;
+
+        rp.data       = data;
         rp.targetPos.set(data.x, 0, data.z);
         rp.targetRotY = data.rotY ?? 0;
         rp.mesh.visible = !!data.alive;
       } else {
-        const mesh = this._buildRemotePlayerMesh();
+        const mesh = this._buildRemotePlayerMesh(data.name ?? 'Player');
         mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
@@ -330,14 +272,13 @@ export class Game {
       }
     };
 
-    this.mp.onPlayerRemoved = (uid) => {
+    this.mp.onPlayerRemoved = uid => {
       const rp = this.remotePlayers.get(uid);
       if (rp) { this.scene.remove(rp.mesh); this.remotePlayers.delete(uid); }
     };
 
-    this.mp.onHitReceived = (evt) => {
-      const shooterData = this.mp.players.get(evt.shooter);
-      const killerName  = shooterData?.name || 'Player';
+    this.mp.onHitReceived = evt => {
+      const killerName = this.mp.players.get(evt.shooter)?.name ?? 'Player';
       this.takeDamage(evt.damage, killerName);
     };
   }
@@ -345,12 +286,13 @@ export class Game {
   // ═══════════════════════════════════════════════════════
   //  MAIN LOOP
   // ═══════════════════════════════════════════════════════
+
   _loop() {
     if (!this.running) return;
     requestAnimationFrame(() => this._loop());
 
-    const nowMs  = performance.now();
-    const delta  = Math.min((nowMs - this.lastFrameMs) / 1000, 0.1);
+    const nowMs = performance.now();
+    const delta = Math.min((nowMs - this.lastFrameMs) / 1000, 0.1);
     this.lastFrameMs = nowMs;
 
     this._update(delta, nowMs);
@@ -360,34 +302,25 @@ export class Game {
   _update(delta, nowMs) {
     if (!this.alive) return;
 
-    // ── Shooting (auto weapons) ─────────────────────────
-    if (this.mouseDown && this.wDef.automatic && this.controls.isLocked) {
+    // Auto fire
+    if (this.mouseDown && this.weapon.def.automatic && this.controls.isLocked) {
       this._tryShoot(nowMs);
     }
 
-    // ── Movement & physics ─────────────────────────────
     this._updateMovement(delta);
     this._updatePhysics(delta);
-
-    // ── FOV lerp (ADS) ─────────────────────────────────
-    if (Math.abs(this.camera.fov - this.targetFov) > 0.3) {
-      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, this.targetFov, 0.18);
-      this.camera.updateProjectionMatrix();
-    }
-
-    // ── Weapon animation ───────────────────────────────
-    this._updateWeaponAnim(delta);
-
-    // ── Health regeneration ────────────────────────────
     this._updateRegen(delta, nowMs);
+    this._updateHitShake(delta);
 
-    // ── Bots ───────────────────────────────────────────
+    // Weapon system — receives isMoving for bob, mouseDown for recoil recovery gate
+    this.weapon.setHitShake(this._hitShake);
+    this.weapon.update(delta, this.isMoving, this.mouseDown);
+
     this._updateBots(delta, nowMs);
-
-    // ── Remote players (multiplayer) ───────────────────
     this._updateRemotePlayers();
+    this.particles.update(delta);
 
-    // ── Firebase position sync ─────────────────────────
+    // Firebase position sync (rate-limited)
     if (this.mp && nowMs - this.lastSyncMs > SYNC_INTERVAL) {
       this.lastSyncMs = nowMs;
       const pos = this.camera.position;
@@ -396,69 +329,71 @@ export class Game {
       this.mp.updatePosition(pos.x, pos.y, pos.z, Math.atan2(dir.x, dir.z));
     }
 
-    // ── Hit shake ──────────────────────────────────────
-    this._updateHitShake(delta);
-
-    // ── Bullet impact particles ─────────────────────────
-    this._updateImpacts(delta);
-
-    // ── HUD ────────────────────────────────────────────
-    this._updateMinimap();
-
-    // ── Damage vignette fade ───────────────────────────
+    // Damage vignette fade-out
     if (this.damageFlashTimer > 0) {
       this.damageFlashTimer -= delta;
-      if (this.damageFlashTimer <= 0) {
-        document.getElementById('damage-vignette').classList.remove('flash');
-      }
+      if (this.damageFlashTimer <= 0) this.hud.hideDamageVignette();
     }
+
+    // Minimap — flatten Three.js objects to plain data
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    this.hud.updateMinimap(
+      { grid: this.map.grid, width: this.map.width, height: this.map.height },
+      { x: this.camera.position.x, z: this.camera.position.z, dirX: dir.x, dirZ: dir.z },
+      this.bots.map(b => ({ x: b.mesh.position.x, z: b.mesh.position.z, alive: b.alive })),
+      [...this.remotePlayers.values()].map(rp => ({
+        x: rp.mesh.position.x, z: rp.mesh.position.z, alive: rp.mesh.visible,
+      })),
+    );
   }
 
   // ═══════════════════════════════════════════════════════
   //  MOVEMENT & PHYSICS
   // ═══════════════════════════════════════════════════════
+
   _updateMovement(delta) {
     if (!this.controls.isLocked) return;
 
     const sprint = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
-    const spd    = PLAYER_SPEED * (sprint ? SPRINT_MULT : 1);
+    const spd    = PLAYER_SPEED
+      * (sprint ? SPRINT_MULT : 1)
+      * (this.weapon.isADS ? 0.55 : 1);
 
-    // AZERTY: Z physical key → KeyW, Q physical key → KeyA
+    // AZERTY: KeyW = physical Z key, KeyA = physical Q key
     const fwd = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0);
     const rgt = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0);
 
-    if (fwd !== 0 || rgt !== 0) {
-      // Build move vector in world space from camera orientation
-      const fwdVec = new THREE.Vector3();
-      this.camera.getWorldDirection(fwdVec);
-      fwdVec.y = 0; fwdVec.normalize();
+    const fwdVec = new THREE.Vector3();
+    this.camera.getWorldDirection(fwdVec);
+    fwdVec.y = 0; fwdVec.normalize();
 
-      const rgtVec = new THREE.Vector3();
-      rgtVec.setFromMatrixColumn(this.camera.matrix, 0);
-      rgtVec.y = 0; rgtVec.normalize();
+    const rgtVec = new THREE.Vector3();
+    rgtVec.setFromMatrixColumn(this.camera.matrix, 0);
+    rgtVec.y = 0; rgtVec.normalize();
 
-      const mv = new THREE.Vector3()
-        .addScaledVector(fwdVec, fwd * spd * delta)
-        .addScaledVector(rgtVec, rgt * spd * delta);
-
-      const cx = this.camera.position;
-      const nx = cx.x + mv.x;
-      const nz = cx.z + mv.z;
-
-      if (!this.map.isWall(nx, cx.z)) this.camera.position.x = nx;
-      if (!this.map.isWall(cx.x, nz)) this.camera.position.z = nz;
-
-      this.isMoving = true;
-      if (this.onGround) {
+    if (this.onGround) {
+      if (fwd !== 0 || rgt !== 0) {
+        this._airVelX = fwdVec.x * fwd * spd + rgtVec.x * rgt * spd;
+        this._airVelZ = fwdVec.z * fwd * spd + rgtVec.z * rgt * spd;
+        this.isMoving = true;
         sound.playFootstep(performance.now() / 1000, sprint);
+      } else {
+        this._airVelX = 0;
+        this._airVelZ = 0;
+        this.isMoving = false;
       }
     } else {
-      this.isMoving = false;
+      // Air: momentum locked at takeoff — camera rotation has no effect on trajectory
+      this.isMoving = Math.hypot(this._airVelX, this._airVelZ) > 0.5;
     }
 
-    // Jump
+    const cx = this.camera.position;
+    if (!this.map.isWall(cx.x + this._airVelX * delta, cx.z)) cx.x += this._airVelX * delta;
+    if (!this.map.isWall(cx.x, cx.z + this._airVelZ * delta)) cx.z += this._airVelZ * delta;
+
     if (this.keys.has('Space') && this.onGround) {
-      this.velY     = JUMP_FORCE;
+      this.velY = JUMP_FORCE;
       this.onGround = false;
       sound.play('jump', { volume: 0.18 });
     }
@@ -473,467 +408,283 @@ export class Game {
         sound.play('land', { volume: 0.15 + Math.min(0.20, -this.velY / 15) });
       }
       this.camera.position.y = PLAYER_HEIGHT;
-      this.velY     = 0;
-      this.onGround = true;
+      this.velY = 0; this.onGround = true;
     } else {
-      this.camera.position.y = newY;
-      this.onGround = false;
+      this.camera.position.y = newY; this.onGround = false;
     }
   }
 
   // ═══════════════════════════════════════════════════════
   //  SHOOTING
   // ═══════════════════════════════════════════════════════
+
   _tryShoot(nowMs) {
-    if (!this.alive || !this.controls.isLocked) return;
-    if (this.reloading) { return; }
-    if (this.ammo <= 0) { this.reload(); return; }
+    if (!this.alive || !this.controls.isLocked || this.weapon.reloading) return;
 
-    const fireInterval = 60000 / this.wDef.fireRate;
-    if (nowMs - this.lastShotMs < fireInterval) return;
-
-    this.lastShotMs = nowMs;
-
-    for (let p = 0; p < this.wDef.pellets; p++) {
-      this._doShot();
+    if (this.weapon.ammo <= 0) {
+      if (this.weapon.reserve > 0) this.weapon.reload();
+      else if (this.weapon.isEmptyClickReady(nowMs)) this.weapon.clickEmpty(nowMs);
+      return;
     }
 
-    this.ammo--;
-    this.recoilZ    = this.wDef.recoilZ;
-    this.recoilRotX = this.wDef.recoilRotX;
+    if (!this.weapon.canFire(nowMs)) return;
 
-    sound.playShoot(this.weaponKey, { isADS: this.isADS });
-    this._showMuzzleFlash();
-    this._updateAmmoHUD();
-
-    if (this.ammo <= 0 && this.reserve > 0) {
-      this.reload();
-    } else if (this.ammo === 0 && this.reserve === 0) {
-      sound.play('empty_click', { volume: 0.6 });
-    }
+    for (let p = 0; p < this.weapon.def.pellets; p++) this._doShot();
+    this.weapon.consumeShot(nowMs);
+    if (this.weapon.ammo <= 0 && this.weapon.reserve > 0) this.weapon.reload();
   }
 
   _doShot() {
-    const baseSpread = this.isADS ? this.wDef.spread * 0.35 : this.wDef.spread;
-    const spread = baseSpread + this._hitShake * 0.10; // being shot widens spread
-    const sx = (Math.random() - 0.5) * spread * 2;
-    const sy = (Math.random() - 0.5) * spread * 2;
+    const s = this.weapon.effectiveSpread;
+    this.raycaster.setFromCamera(
+      new THREE.Vector2((Math.random() - 0.5) * s * 2, (Math.random() - 0.5) * s * 2),
+      this.camera,
+    );
 
-    this.raycaster.setFromCamera(new THREE.Vector2(sx, sy), this.camera);
-
-    // ── Check bots ─────────────────────────────────────
-    const botMeshes = this.bots.filter(b => b.alive).map(b => b.mesh);
-    const botHits   = this.raycaster.intersectObjects(botMeshes, true);
+    // ── Bots ────────────────────────────────────────────
+    const botHits = this.raycaster.intersectObjects(
+      this.bots.filter(b => b.alive).map(b => b.mesh), true,
+    );
     if (botHits.length > 0) {
       const hit = botHits[0];
       const bot = this.bots.find(b => b.mesh === hit.object || b.mesh === hit.object.parent);
-      if (bot?.alive) {
-        const isHead = hit.object.position.y > 1.3;
-        const dmg    = isHead ? this.wDef.damage * HEADSHOT_MULT : this.wDef.damage;
-        const killed = bot.takeDamage(dmg);
-        sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
-        this._showHitMarker(isHead);
-        if (killed) {
-          this._killStreak++;
-          this.kills++;
-          sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
-          this._updateScoreHUD();
-          this._addKillFeed(this.username, `Bot-${bot.index + 1}`);
-          if (this.mp) this.mp.updateKills(this.kills, this.deaths);
-        }
+      if (!bot?.alive) return;
+
+      const isHead = hit.object.position.y > 1.3;
+      const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
+      const killed = bot.takeDamage(dmg);
+
+      sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
+      this.hud.showHitMarker(isHead);
+
+      if (killed) {
+        this._onKill(`Bot-${bot.index + 1}`);
+      } else {
+        this.hud.showScorePopup(isHead ? '+75' : '+50');
       }
-      return; // hit an enemy → no wall impact
+      return; // bot absorbs the bullet
     }
 
-    // ── Check remote players (multiplayer) ────────────
+    // ── Remote players ───────────────────────────────────
     if (this.mode === 'multi' && this.remotePlayers.size > 0) {
-      const rMeshes = [...this.remotePlayers.values()].map(r => r.mesh);
-      const rHits   = this.raycaster.intersectObjects(rMeshes, true);
+      const rHits = this.raycaster.intersectObjects(
+        [...this.remotePlayers.values()].map(r => r.mesh), true,
+      );
       if (rHits.length > 0) {
         const hit = rHits[0];
         for (const [uid, rp] of this.remotePlayers) {
           if (rp.mesh === hit.object || rp.mesh === hit.object.parent) {
             const isHead = hit.object.position.y > 1.3;
-            const dmg    = isHead ? this.wDef.damage * HEADSHOT_MULT : this.wDef.damage;
+            const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
             this.mp.sendHit(uid, dmg);
             sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
-            this._showHitMarker(isHead);
-            // Remember we shot this player (for kill confirm)
+            this.hud.showHitMarker(isHead);
+            this.hud.showScorePopup(isHead ? '+75' : '+50');
             this._recentlyShot.add(uid);
             setTimeout(() => this._recentlyShot.delete(uid), 5000);
             break;
           }
         }
-        return; // hit a player → no wall impact
+        return; // player absorbs the bullet
       }
     }
 
-    // ── Impact on any static surface (wall / floor / ceiling) ──
-    const staticHits = this.raycaster.intersectObjects(this.map.staticMeshes, false);
-    if (staticHits.length > 0) {
-      const sh     = staticHits[0];
+    // ── Static surfaces ──────────────────────────────────
+    const wallHits = this.raycaster.intersectObjects(this.map.staticMeshes, false);
+    if (wallHits.length > 0) {
+      const sh     = wallHits[0];
       const normal = sh.face.normal.clone().transformDirection(sh.object.matrixWorld);
-      this._spawnImpact(sh.point, normal);
+      this.particles.spawnImpact(sh.point, normal);
       sound.play('bullet_wall', { volume: 0.5, pitch: 0.85 + Math.random() * 0.3 });
     }
   }
 
   // ═══════════════════════════════════════════════════════
-  //  RELOAD
+  //  COMBAT
   // ═══════════════════════════════════════════════════════
-  reload() {
-    if (this.reloading || this.ammo === this.wDef.magSize || this.reserve === 0) return;
-    this.reloading = true;
 
-    // Kick off weapon drop animation
-    this._reloadAnimT      = 0;
-    this._reloadAnimActive = true;
-
-    document.getElementById('reload-bar').classList.remove('hidden');
-    sound.play('reload', { volume: 0.8 });
-    const fill = document.getElementById('reload-fill-bar');
-    fill.style.transition = 'none';
-    fill.style.width = '0%';
-    void fill.offsetHeight;
-    fill.style.transition = `width ${this.wDef.reloadTime}ms linear`;
-    fill.style.width = '100%';
-
-    this._reloadTimer = setTimeout(() => {
-      const needed = this.wDef.magSize - this.ammo;
-      const taken  = Math.min(needed, this.reserve);
-      this.ammo   += taken;
-      this.reserve -= taken;
-      this.reloading         = false;
-      this._reloadAnimActive = false;
-      document.getElementById('reload-bar').classList.add('hidden');
-      this._updateAmmoHUD();
-    }, this.wDef.reloadTime);
-  }
-
-  // ═══════════════════════════════════════════════════════
-  //  DAMAGE / DEATH / RESPAWN
-  // ═══════════════════════════════════════════════════════
   takeDamage(amount, killerName = 'Enemy') {
     if (!this.alive) return;
     this.health      = Math.max(0, this.health - amount);
     this.lastDamageMs = performance.now();
+    this._hitShake   = Math.min(1.0, this._hitShake + amount / 25);
 
-    // Hit shake — heavier hits shake harder
-    this._hitShake = Math.min(1.0, this._hitShake + amount / 25);
     sound.play('hurt', { volume: Math.min(1, amount / 30) });
-
-    // Flash vignette
-    const vign = document.getElementById('damage-vignette');
-    vign.classList.remove('flash');
-    void vign.offsetHeight;
-    vign.classList.add('flash');
+    this.hud.showDamageVignette();
     this.damageFlashTimer = 0.4;
-
-    this._updateHealthHUD();
-
-    if (this.mp) this.mp.updateHealth(this.health);
+    this.hud.setHealth(this.health);
+    this.mp?.updateHealth(this.health);
 
     if (this.health <= 0) this._die(killerName);
   }
 
+  /** Shared kill-confirm path for bots and remote players. */
+  _onKill(victimName) {
+    this._killStreak++;
+    this.kills++;
+    this.hud.showScorePopup('+100', true);
+    this.hud.showMedal(this._killStreak);
+    sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
+    this.hud.setScore(this.kills, this.deaths);
+    this.hud.addKillFeed(this.username, victimName);
+    this.mp?.updateKills(this.kills, this.deaths);
+  }
+
+  /** kill-confirm pitch: +0.08 per kill in streak, capped at 5. */
+  _killConfirmPitch() {
+    return 1.0 + Math.min(4, Math.max(0, this._killStreak - 1)) * 0.08;
+  }
+
   _die(killerName) {
-    this.alive = false;
+    this.alive       = false;
     this.deaths++;
-    this._killStreak = 0;  // streak resets on death
-    if (this.mp) this.mp.updateKills(this.kills, this.deaths);
+    this._killStreak = 0;
+    this.mp?.updateKills(this.kills, this.deaths);
 
     sound.play('die', { volume: 1.0 });
     this.controls.unlock();
-    document.getElementById('pointer-lock-overlay').classList.add('hidden');
-    document.getElementById('scope-overlay').classList.add('hidden');
-    document.getElementById('crosshair').classList.remove('hidden');
-    this.isADS = false;
-    this.targetFov = this.opts.fov;
-
-    const ds = document.getElementById('death-screen');
-    document.getElementById('lbl-killer').textContent = killerName;
-    ds.classList.remove('hidden');
+    this.weapon.setADS(false);
+    this._applyADSState(false);
+    this.hud.addKillFeed(killerName, this.username);
+    this.hud.setScore(this.kills, this.deaths);
+    this.hud.showDeathScreen(killerName);
 
     let countdown = RESPAWN_TIME;
-    document.getElementById('lbl-respawn-count').textContent = countdown;
-
-      this._addKillFeed(killerName, this.username);
-
-      const iv = setInterval(() => {
-        countdown--;
-        document.getElementById('lbl-respawn-count').textContent = countdown;
-        if (countdown <= 0) {
-          clearInterval(iv);
-          this._respawn();
-        }
-      }, 1000);
+    this.hud.setRespawnCountdown(countdown);
+    const iv = setInterval(() => {
+      this.hud.setRespawnCountdown(--countdown);
+      if (countdown <= 0) { clearInterval(iv); this._respawn(); }
+    }, 1000);
   }
 
   _respawn() {
-    this.health    = 100;
-    this.alive     = true;
-    this.ammo      = this.wDef.magSize;
-    this.reserve   = this.wDef.reserve;
-    this.reloading = false;
-    clearTimeout(this._reloadTimer);
-    document.getElementById('reload-bar').classList.add('hidden');
+    this.health = 100;
+    this.alive  = true;
+    this.weapon.equip(this.weapon.key);   // resets ammo via equip, fires callbacks
 
     const sp   = this.map.spawnPoints;
     const pick = sp[Math.floor(Math.random() * sp.length)];
     this.camera.position.set(pick.x, PLAYER_HEIGHT, pick.z);
 
-    this._updateHealthHUD();
-    this._updateAmmoHUD();
-    this._updateScoreHUD();
-
-    document.getElementById('death-screen').classList.add('hidden');
-    if (this.mp) this.mp.updateHealth(100);
-
+    this.hud.setHealth(100);
+    this.hud.setScore(this.kills, this.deaths);
+    this.hud.hideDeathScreen();
+    this.mp?.updateHealth(100);
     setTimeout(() => this.controls.lock(), 100);
   }
 
   // ═══════════════════════════════════════════════════════
-  //  ADS / SCOPE
+  //  REGEN
   // ═══════════════════════════════════════════════════════
-  _toggleADS() {
-    if (!this.controls.isLocked || !this.alive) return;
-    this.isADS = !this.isADS;
-    this.targetFov = this.isADS
-      ? this.opts.fov / this.wDef.zoom
-      : this.opts.fov;
 
-    const scopeEl = document.getElementById('scope-overlay');
-    const xhairEl = document.getElementById('crosshair');
-    if (this.isADS && this.wDef.zoom >= 3) {
-      scopeEl.classList.remove('hidden');
-      xhairEl.classList.add('hidden');
-    } else {
-      scopeEl.classList.add('hidden');
-      xhairEl.classList.remove('hidden');
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════
-  //  REGENERATION
-  // ═══════════════════════════════════════════════════════
   _updateRegen(delta, nowMs) {
     if (!this.alive || this.health >= 100) return;
     if (nowMs - this.lastDamageMs < REGEN_DELAY) return;
     this.health = Math.min(100, this.health + REGEN_RATE * delta);
-    this._updateHealthHUD();
-    if (this.mp) this.mp.updateHealth(Math.round(this.health));
+    this.hud.setHealth(this.health);
+    this.mp?.updateHealth(Math.round(this.health));
   }
 
   // ═══════════════════════════════════════════════════════
-  //  BOTS
+  //  BOTS & REMOTE PLAYERS
   // ═══════════════════════════════════════════════════════
+
   _updateBots(delta, nowMs) {
-    const pPos = this.camera.position;
     this.bots.forEach(bot => {
-      bot.update(delta, nowMs, pPos, (dmg, name) => this.takeDamage(dmg, name));
+      bot.update(delta, nowMs, this.camera.position, (dmg, name) => this.takeDamage(dmg, name));
       bot.updateHealthBar(this.camera);
     });
   }
 
-  // ═══════════════════════════════════════════════════════
-  //  REMOTE PLAYERS (multiplayer)
-  // ═══════════════════════════════════════════════════════
   _updateRemotePlayers() {
     this.remotePlayers.forEach(rp => {
       if (!rp.mesh.visible) return;
       rp.mesh.position.lerp(rp.targetPos, 0.25);
-      rp.mesh.rotation.y = THREE.MathUtils.lerp(
-        rp.mesh.rotation.y, rp.targetRotY ?? 0, 0.25
-      );
+      rp.mesh.rotation.y = THREE.MathUtils.lerp(rp.mesh.rotation.y, rp.targetRotY, 0.25);
+      // Billboard name labels (depthTest=false) toward local camera
+      rp.mesh.traverse(c => {
+        if (c.isMesh && c.material?.depthTest === false) c.lookAt(this.camera.position);
+      });
     });
   }
 
   // ═══════════════════════════════════════════════════════
-  //  WEAPON ANIMATION (recoil + head bob)
+  //  HIT SHAKE
   // ═══════════════════════════════════════════════════════
-  _updateWeaponAnim(delta) {
-    // Recoil decay
-    this.recoilZ    *= 0.82;
-    this.recoilRotX *= 0.82;
 
-    // Head bob
-    this.bobPhase += delta * (this.isMoving ? 7.5 : 2.0);
-    const bobAmt   = this.isMoving ? 1 : 0.3;
-    const bobX     = Math.sin(this.bobPhase) * 0.010 * bobAmt;
-    const bobY     = Math.abs(Math.cos(this.bobPhase * 0.5)) * 0.007 * bobAmt;
-
-    // Reload animation — weapon drops down and tilts, then returns
-    let reloadDrop = 0;
-    let reloadTilt = 0;
-    if (this._reloadAnimActive) {
-      const totalSec    = (this.wDef.reloadTime / 1000);
-      this._reloadAnimT = Math.min(1, this._reloadAnimT + delta / totalSec);
-      const t           = this._reloadAnimT;
-      // Sinusoidal arc: peaks at t=0.5 (mid-reload) and returns by t=1
-      reloadDrop = Math.sin(t * Math.PI) * 0.22;
-      reloadTilt = Math.sin(t * Math.PI) * 0.45;
-    }
-
-    if (this.weaponGroup) {
-      this.weaponGroup.position.set(
-        0.22 + bobX,
-        -0.28 - bobY - reloadDrop,
-        -0.46 - this.recoilZ
-      );
-      this.weaponGroup.rotation.x = this.recoilRotX;
-      this.weaponGroup.rotation.z = reloadTilt;
-    }
+  _updateHitShake(delta) {
+    if (this._hitShake <= 0.005) { this._hitShake = 0; return; }
+    this._hitShake = Math.max(0, this._hitShake - delta * 3.5);
+    const s = this._hitShake;
+    // Apply random camera jitter; PointerLockControls will overwrite it on next mousemove
+    this.camera.quaternion.multiply(
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(
+        (Math.random() - 0.5) * s * 0.10,
+        (Math.random() - 0.5) * s * 0.05,
+        0, 'YXZ',
+      ))
+    );
   }
 
   // ═══════════════════════════════════════════════════════
-  //  HUD UPDATES
+  //  ADS
   // ═══════════════════════════════════════════════════════
-  _updateHealthHUD() {
-    const pct = Math.max(0, this.health) / 100;
-    const bar = document.getElementById('health-bar');
-    bar.style.width = `${pct * 100}%`;
-    // Shift hue: 0=red, 60=yellow, 120=green — matches CSS hsl()
-    const hue = Math.floor(pct * 120);
-    bar.style.backgroundColor = `hsl(${hue}, 85%, 48%)`;
-    document.getElementById('hud-health-val').textContent = Math.ceil(this.health);
+
+  _toggleADS() {
+    if (!this.controls.isLocked || !this.alive) return;
+    this.weapon.toggleADS();
+    this._applyADSState(this.weapon.isADS);
   }
 
-  _updateAmmoHUD() {
-    document.getElementById('hud-ammo-mag').textContent     = this.ammo;
-    document.getElementById('hud-ammo-reserve').textContent = this.reserve;
-  }
-
-  _updateScoreHUD() {
-    document.getElementById('hud-kills').textContent  = `K ${this.kills}`;
-    document.getElementById('hud-deaths').textContent = `D ${this.deaths}`;
-  }
-
-  _addKillFeed(killer, victim) {
-    const feed  = document.getElementById('kill-feed');
-    const entry = document.createElement('div');
-    entry.className = 'kill-entry';
-    const isMe = victim === this.username;
-    entry.innerHTML =
-      `<span class="kf-killer">${killer}</span>` +
-      `<span class="kf-icon">✦</span>` +
-      `<span class="kf-victim${isMe ? ' is-me' : ''}">${victim}</span>`;
-    feed.prepend(entry);
-    setTimeout(() => entry.remove(), 5000);
-  }
-
-  _showHitMarker(isHeadshot = false) {
-    const el = document.getElementById('hit-marker');
-    el.className = isHeadshot ? 'headshot' : 'hit';
-    el.classList.remove('hidden');
-    clearTimeout(this._hmTimeout);
-    this._hmTimeout = setTimeout(() => el.classList.add('hidden'), 220);
-  }
-
-  _showMuzzleFlash() {
-    this.muzzleFlash.visible = true;
-    clearTimeout(this._flashOff);
-    this._flashOff = setTimeout(() => { this.muzzleFlash.visible = false; }, 55);
+  /** Central point for all ADS side-effects (speed/sens handled in movement/pointer). */
+  _applyADSState(on) {
+    // Mouse sensitivity
+    this.controls.pointerSpeed = this.opts.sensitivity * 0.42 * (on ? 0.5 : 1);
+    // Scope overlay (sniper only)
+    if (this.weapon.def.zoom >= 3) this.hud.setScope(on);
+    // Crosshair shrink (non-scope weapons still see the crosshair, just smaller)
+    this.hud.setAiming(on);
   }
 
   // ═══════════════════════════════════════════════════════
-  //  MINIMAP
+  //  INPUT
   // ═══════════════════════════════════════════════════════
-  _updateMinimap() {
-    const ctx = this._mmCtx;
-    const W = this._mmCanvas.width;
-    const H = this._mmCanvas.height;
-    const mapWorldW = this.map.width  * CELL_SIZE;
-    const mapWorldH = this.map.height * CELL_SIZE;
-    const sx = W / mapWorldW;
-    const sz = H / mapWorldH;
 
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(0,0,0,0.65)';
-    ctx.fillRect(0, 0, W, H);
-
-    // Floor cells
-    ctx.fillStyle = '#2a3545';
-    for (let gx = 0; gx < this.map.width; gx++) {
-      for (let gz = 0; gz < this.map.height; gz++) {
-        if (this.map.grid[gx][gz] === 1) {
-          ctx.fillRect(
-            gx * CELL_SIZE * sx, gz * CELL_SIZE * sz,
-            CELL_SIZE * sx + 0.5, CELL_SIZE * sz + 0.5
-          );
-        }
-      }
-    }
-
-    // Bots
-    ctx.fillStyle = '#ff3333';
-    this.bots.forEach(b => {
-      if (!b.alive) return;
-      ctx.beginPath();
-      ctx.arc(b.mesh.position.x * sx, b.mesh.position.z * sz, 3, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // Remote players
-    ctx.fillStyle = '#4488ff';
-    this.remotePlayers.forEach(rp => {
-      if (!rp.mesh.visible) return;
-      ctx.beginPath();
-      ctx.arc(rp.mesh.position.x * sx, rp.mesh.position.z * sz, 3, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // Player
-    const px = this.camera.position.x * sx;
-    const pz = this.camera.position.z * sz;
-    const dir = new THREE.Vector3();
-    this.camera.getWorldDirection(dir);
-
-    ctx.fillStyle = '#00ff88';
-    ctx.beginPath();
-    ctx.arc(px, pz, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    const len = Math.hypot(dir.x, dir.z);
-    if (len > 0.01) {
-      ctx.strokeStyle = '#00ff88';
-      ctx.lineWidth   = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(px, pz);
-      ctx.lineTo(px + (dir.x / len) * 9, pz + (dir.z / len) * 9);
-      ctx.stroke();
-    }
+  _bindInput() {
+    document.addEventListener('keydown',    this._onKeyDown);
+    document.addEventListener('keyup',      this._onKeyUp);
+    document.addEventListener('mousedown',  this._onMouseDn);
+    document.addEventListener('mouseup',    this._onMouseUp);
+    document.addEventListener('contextmenu', this._onCtxMenu);
   }
 
-  // ═══════════════════════════════════════════════════════
-  //  INPUT HANDLERS
-  // ═══════════════════════════════════════════════════════
+  _unbindInput() {
+    document.removeEventListener('keydown',    this._onKeyDown);
+    document.removeEventListener('keyup',      this._onKeyUp);
+    document.removeEventListener('mousedown',  this._onMouseDn);
+    document.removeEventListener('mouseup',    this._onMouseUp);
+    document.removeEventListener('contextmenu', this._onCtxMenu);
+    window.removeEventListener('resize',       this._onResize);
+  }
+
   _handleKeyDown(e) {
     this.keys.add(e.code);
-
-    if (e.code === 'KeyR' && this.controls.isLocked && this.alive) {
-      this.reload();
-    }
-    if (e.code === 'KeyE' && this.controls.isLocked && this.alive) {
-      this._toggleADS();
-    }
+    if (!this.controls.isLocked || !this.alive) return;
+    if (e.code === 'KeyR') this.weapon.reload();
+    if (e.code === 'KeyE') this._toggleADS();
   }
 
-  _handleKeyUp(e) {
-    this.keys.delete(e.code);
-  }
+  _handleKeyUp(e) { this.keys.delete(e.code); }
 
   _handleMouseDown(e) {
     if (!this.controls.isLocked || !this.alive) return;
     if (e.button === 0) {
       this.mouseDown = true;
-      if (!this.wDef.automatic) {
-        this._tryShoot(performance.now());
-      }
+      if (!this.weapon.def.automatic) this._tryShoot(performance.now());
     }
     if (e.button === 2) {
       if (this.opts.adsMode === 'hold') {
-        // Activate ADS immediately on press
-        if (!this.isADS) this._toggleADS();
+        if (!this.weapon.isADS) this._toggleADS();
       } else {
         this._toggleADS();
       }
@@ -942,15 +693,7 @@ export class Game {
 
   _handleMouseUp(e) {
     if (e.button === 0) this.mouseDown = false;
-    if (e.button === 2 && this.opts.adsMode === 'hold') {
-      // Release ADS when button is released
-      if (this.isADS) this._toggleADS();
-    }
-  }
-
-  _handleRMB(e) {
-    e.preventDefault();
-    this._toggleADS();
+    if (e.button === 2 && this.opts.adsMode === 'hold' && this.weapon.isADS) this._toggleADS();
   }
 
   _handleResize() {
@@ -960,220 +703,86 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════
-  //  HIT SHAKE
-  // ═══════════════════════════════════════════════════════
-  _updateHitShake(delta) {
-    if (this._hitShake <= 0.005) { this._hitShake = 0; return; }
-    this._hitShake = Math.max(0, this._hitShake - delta * 3.5);
-    const s = this._hitShake;
-
-    // Random camera jitter — persists until next mousemove from PointerLockControls
-    const jitter = new THREE.Quaternion().setFromEuler(new THREE.Euler(
-      (Math.random() - 0.5) * s * 0.10,
-      (Math.random() - 0.5) * s * 0.05,
-      0, 'YXZ'
-    ));
-    this.camera.quaternion.multiply(jitter);
-  }
-
-  // ═══════════════════════════════════════════════════════
-  //  BULLET IMPACT PARTICLES
-  // ═══════════════════════════════════════════════════════
-  _spawnImpact(point, normal) {
-    // ── Sparks (bright, fast, short-lived) ─────────────
-    const sparkCount = 6 + Math.floor(Math.random() * 4);
-    for (let i = 0; i < sparkCount; i++) {
-      const isSpark = i < sparkCount * 0.5;
-      const size    = isSpark ? 0.018 + Math.random() * 0.022 : 0.025 + Math.random() * 0.035;
-      const geo     = new THREE.SphereGeometry(size, 4, 4);
-      const mat     = new THREE.MeshBasicMaterial({
-        color:       isSpark ? 0xffcc44 : 0x888877,
-        transparent: true,
-        opacity:     1,
-        depthWrite:  false,
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.copy(point).addScaledVector(normal, 0.04);
-      this.scene.add(mesh);
-
-      // Velocity: spray around wall normal
-      const spread = new THREE.Vector3(
-        (Math.random() - 0.5) * 2.5,
-        Math.random() * 2.0 + 0.5,
-        (Math.random() - 0.5) * 2.5
-      );
-      const vel = normal.clone().multiplyScalar(1.5 + Math.random() * 2).add(spread);
-      const maxLife = isSpark ? 0.35 + Math.random() * 0.25 : 0.5 + Math.random() * 0.3;
-
-      this._impactParticles.push({ mesh, vel, life: maxLife, maxLife });
-    }
-
-    // ── Brief muzzle-style flash at impact point ────────
-    const flash = new THREE.PointLight(0xffaa33, 6, 1.8);
-    flash.position.copy(point).addScaledVector(normal, 0.06);
-    this.scene.add(flash);
-    setTimeout(() => this.scene.remove(flash), 70);
-  }
-
-  _updateImpacts(delta) {
-    for (let i = this._impactParticles.length - 1; i >= 0; i--) {
-      const p = this._impactParticles[i];
-      p.life -= delta;
-      p.vel.y -= 9 * delta;          // gravity
-      p.mesh.position.addScaledVector(p.vel, delta * 0.6);
-      p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
-
-      if (p.life <= 0) {
-        this.scene.remove(p.mesh);
-        p.mesh.geometry.dispose();
-        p.mesh.material.dispose();
-        this._impactParticles.splice(i, 1);
-      }
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════
-  //  IN-GAME CONTROLS (called from pause panel)
+  //  MESH BUILDERS
   // ═══════════════════════════════════════════════════════
 
-  /** Switch weapon mid-game (resets ammo to fresh mag). */
-  changeWeapon(key) {
-    if (!WEAPONS[key]) return;
-    this.weaponKey         = key;
-    this.wDef              = WEAPONS[key];
-    this.ammo              = this.wDef.magSize;
-    this.reserve           = this.wDef.reserve;
-    this.reloading         = false;
-    this._reloadAnimActive = false;
-    clearTimeout(this._reloadTimer);
-    document.getElementById('reload-bar').classList.add('hidden');
-
-    // Rebuild 3-D weapon model
-    this.camera.remove(this.weaponGroup);
-    this.weaponGroup = this._buildGunModel(key);
-    this.weaponGroup.position.set(0.22, -0.28, -0.46);
-    this.camera.add(this.weaponGroup);
-
-    // Re-attach muzzle flash
-    const flashMesh  = new THREE.Mesh(
-      new THREE.SphereGeometry(0.05, 6, 6),
-      new THREE.MeshBasicMaterial({ color: 0xffdd44 })
-    );
-    const flashLight = new THREE.PointLight(0xffaa00, 4, 2.5);
-    this.muzzleFlash = new THREE.Group();
-    this.muzzleFlash.add(flashMesh, flashLight);
-    this.muzzleFlash.position.set(0, 0, -0.62);
-    this.muzzleFlash.visible = false;
-    this.weaponGroup.add(this.muzzleFlash);
-
-    document.getElementById('hud-weapon-name').textContent = this.wDef.name;
-    this._updateAmmoHUD();
-  }
-
-  /** Kill-confirm pitch: +0.08 per kill in current life, capped at streak 5. */
-  _killConfirmPitch() {
-    return 1.0 + Math.min(4, Math.max(0, this._killStreak - 1)) * 0.08;
-  }
-
-  /** Update mouse sensitivity live (called from pause panel). */
-  setSensitivity(value) {
-    this.opts.sensitivity = value;
-    if (this.controls) this.controls.pointerSpeed = value * 0.42;
-  }
-
-  // ═══════════════════════════════════════════════════════
-  //  GUN MODEL BUILDER
-  // ═══════════════════════════════════════════════════════
-  _buildGunModel(key) {
-    const g    = new THREE.Group();
-    const wDef = WEAPONS[key];
-    const bMat = new THREE.MeshLambertMaterial({ color: wDef.bodyColor });
-    const dMat = new THREE.MeshLambertMaterial({ color: wDef.barrelColor });
-
-    const configs = {
-      assault_rifle: [
-        { mat: bMat, geo: [0.068, 0.068, 0.38], pos: [0,       0,      0      ] }, // receiver
-        { mat: dMat, geo: [0.030, 0.030, 0.22], pos: [0,  0.018, -0.30] },         // barrel
-        { mat: bMat, geo: [0.040, 0.13,  0.06], pos: [0, -0.098,  0.04 ] },        // magazine
-        { mat: bMat, geo: [0.058, 0.058, 0.14], pos: [0,       0,  0.26 ] },       // stock
-        { mat: dMat, geo: [0.018, 0.018, 0.08], pos: [0,  0.050,  0.01 ] },        // carry handle
-      ],
-      shotgun: [
-        { mat: bMat, geo: [0.090, 0.075, 0.36], pos: [0,      0,     0     ] }, // receiver
-        { mat: dMat, geo: [0.055, 0.040, 0.26], pos: [0, 0.018, -0.31] },       // barrel
-        { mat: bMat, geo: [0.085, 0.050, 0.09], pos: [0,      0,  0.16] },      // pump
-        { mat: bMat, geo: [0.060, 0.065, 0.18], pos: [0,      0,  0.27] },      // stock
-      ],
-      sniper: [
-        { mat: bMat, geo: [0.052, 0.052, 0.50], pos: [0,      0,     0    ] }, // receiver
-        { mat: dMat, geo: [0.020, 0.020, 0.30], pos: [0, 0.010, -0.40] },      // barrel
-        { mat: dMat, geo: [0.030, 0.030, 0.18], pos: [0, 0.048,  0.00] },      // scope body
-        { mat: bMat, geo: [0.044, 0.046, 0.18], pos: [0,      0,  0.34] },     // stock
-        { mat: bMat, geo: [0.034, 0.12,  0.05], pos: [0, -0.086, 0.12] },      // magazine
-      ],
-    };
-
-    (configs[key] || configs.assault_rifle).forEach(({ mat, geo, pos }) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...geo), mat);
-      mesh.position.set(...pos);
-      g.add(mesh);
-    });
-
-    return g;
-  }
-
-  // ═══════════════════════════════════════════════════════
-  //  REMOTE PLAYER MESH
-  // ═══════════════════════════════════════════════════════
-  _buildRemotePlayerMesh() {
+  _buildRemotePlayerMesh(playerName = 'Player') {
     const g    = new THREE.Group();
     const bMat = new THREE.MeshLambertMaterial({ color: 0x0055cc });
     const hMat = new THREE.MeshLambertMaterial({ color: 0xc8865a });
     const gMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
 
-    // Torso
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.65, 0.30), bMat);
-    torso.position.y = 0.90;
-    g.add(torso);
+    const box = (mat, [w, h, d], [x, y, z]) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      m.position.set(x, y, z);
+      g.add(m);
+      return m;
+    };
 
-    // Arms
-    for (const side of [-0.37, 0.37]) {
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bMat);
-      arm.position.set(side, 0.90, 0);
-      g.add(arm);
-    }
+    box(bMat, [0.55, 0.65, 0.30], [0,     0.90, 0]);  // torso
+    box(bMat, [0.16, 0.50, 0.16], [-0.37, 0.90, 0]);  // left arm
+    box(bMat, [0.16, 0.50, 0.16], [ 0.37, 0.90, 0]);  // right arm
+    box(bMat, [0.20, 0.55, 0.22], [-0.13, 0.35, 0]);  // left leg
+    box(bMat, [0.20, 0.55, 0.22], [ 0.13, 0.35, 0]);  // right leg
+    box(hMat, [0.34, 0.32, 0.30], [0,     1.52, 0]);  // head
+    box(gMat, [0.06, 0.06, 0.38], [0.37,  0.72, 0.24]); // gun (positive Z = forward)
 
-    // Neck
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), hMat);
     neck.position.y = 1.30;
     g.add(neck);
 
-    // Head
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.32, 0.30), hMat);
-    head.position.y = 1.52;
-    g.add(head);
+    // Name label — billboarded each frame in _updateRemotePlayers
+    const nc  = document.createElement('canvas');
+    nc.width  = 256; nc.height = 48;
+    const ctx = nc.getContext('2d');
+    ctx.font       = 'bold 22px "Rajdhani", sans-serif';
+    ctx.fillStyle  = '#88bbff';
+    ctx.textAlign  = 'center';
+    ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 6;
+    ctx.fillText(playerName, 128, 34);
 
-    // Legs
-    for (const side of [-0.13, 0.13]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bMat);
-      leg.position.set(side, 0.35, 0);
-      g.add(leg);
-    }
-
-    // Gun held in right hand — positive Z = forward (matches player facing direction)
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.38), gMat);
-    gun.position.set(0.37, 0.72, 0.24);
-    g.add(gun);
+    const label = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.0, 0.19),
+      new THREE.MeshBasicMaterial({
+        map: new THREE.CanvasTexture(nc),
+        transparent: true, depthTest: false, side: THREE.DoubleSide,
+      }),
+    );
+    label.name = 'nameSprite';
+    label.position.y = 2.28;
+    g.add(label);
 
     return g;
   }
 
-  /** Flat corpse mesh for fallen players/bots. */
-  _createCorpseMesh(pos, rotY, color = 0xaa1111) {
+  /** Flat body mesh. @param {THREE.Vector3} pos @param {number} rotY @param {number} color */
+  _makeCorpse(pos, rotY, color) {
     const mat  = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 1 });
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 1.50), mat);
     mesh.position.set(pos.x, 0.09, pos.z);
     mesh.rotation.y = rotY;
     return mesh;
+  }
+
+  /**
+   * Fade a mesh's opacity from 1→0 between fadeStartSec and fadeEndSec,
+   * then remove it from the scene and free its material.
+   */
+  _fadeAndRemove(mesh, fadeStartSec, fadeEndSec) {
+    let t = 0;
+    const iv = setInterval(() => {
+      t += 0.1;
+      if (t > fadeStartSec) {
+        mesh.material.opacity = Math.max(
+          0,
+          1 - (t - fadeStartSec) / (fadeEndSec - fadeStartSec),
+        );
+      }
+      if (t >= fadeEndSec) {
+        clearInterval(iv);
+        this.scene?.remove(mesh);
+        mesh.material.dispose();
+      }
+    }, 100);
   }
 }

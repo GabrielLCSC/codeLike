@@ -131,11 +131,9 @@ export class Bot {
     const dist = Math.hypot(dx, dz);
     if (dist < 0.25) return;
 
-    const nx  = dx / dist;
-    const nz  = dz / dist;
-    const nx2 = nz * delta * speed;
-    const nz2 = -nx * delta * speed;
-    let newX  = bx + nx * speed * delta;
+    const nx = dx / dist;
+    const nz = dz / dist;
+    let newX = bx + nx * speed * delta;
     let newZ  = bz + nz * speed * delta;
 
     // Sliding wall collision
@@ -267,6 +265,24 @@ export class Bot {
     gun.position.set(0.28, 1.10, 0.22);
     group.add(gun);
 
+    // Name label (canvas texture, always facing camera)
+    const nameCanvas = document.createElement('canvas');
+    nameCanvas.width = 256; nameCanvas.height = 48;
+    const nc = nameCanvas.getContext('2d');
+    nc.font = 'bold 22px "Rajdhani", sans-serif';
+    nc.fillStyle = '#ff8888';
+    nc.textAlign = 'center';
+    nc.shadowColor = 'rgba(0,0,0,0.8)'; nc.shadowBlur = 6;
+    nc.fillText(`BOT-${this.index + 1}`, 128, 34);
+    const nameTex = new THREE.CanvasTexture(nameCanvas);
+    const nameSprite = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.0, 0.19),
+      new THREE.MeshBasicMaterial({ map: nameTex, transparent: true, depthTest: false, side: THREE.DoubleSide })
+    );
+    nameSprite.name = 'nameSprite';
+    nameSprite.position.y = 2.28;
+    group.add(nameSprite);
+
     // Health bar (sprite) — simple plane above head
     const barBg = new THREE.Mesh(
       new THREE.PlaneGeometry(0.5, 0.06),
@@ -286,23 +302,17 @@ export class Bot {
     return group;
   }
 
-  /** Call each frame to keep health bar facing the camera */
+  /** Call each frame to keep health bar and name label facing the camera */
   updateHealthBar(camera) {
-    if (!this._healthBar || !this.alive) return;
-    const ratio = Math.max(0, this.health / this.maxHealth);
-    this._healthBar.scale.x = ratio;
-    this._healthBar.position.x = (ratio - 1) * 0.25;
-
-    // Billboard: face camera
-    const parent = this.mesh;
-    const dir = new THREE.Vector3();
-    dir.subVectors(camera.position, parent.position);
-    dir.y = 0;
-    if (dir.lengthSq() > 0.001) {
-      parent.children
-        .filter(c => c === this._healthBar || c === this._healthBar.parent)
-        .forEach(c => c.lookAt(camera.position));
+    if (!this._healthBar) return;
+    if (this.alive) {
+      const ratio = Math.max(0, this.health / this.maxHealth);
+      this._healthBar.scale.x = ratio;
+      this._healthBar.position.x = (ratio - 1) * 0.25;
     }
-    this._healthBar.lookAt(camera.position);
+    // Billboard all name/health sprites toward camera
+    this.mesh.traverse(c => {
+      if (c.isMesh && c.material?.depthTest === false) c.lookAt(camera.position);
+    });
   }
 }

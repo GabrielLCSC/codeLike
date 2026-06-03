@@ -160,7 +160,7 @@ export class MultiplayerManager {
     return {
       name:   username,
       weapon,
-      isHost: isHost ? true : false,
+      isHost,
       x: 0, y: 0, z: 0, rotY: 0,
       health: 100,
       kills:  0,
