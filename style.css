@@ -203,6 +203,39 @@ html, body {
 }
 .stat-fill { height: 100%; background: var(--green); border-radius: 2px; }
 
+/* ─── BOT COUNT STEPPER ──────────────────────────────────── */
+.solo-only { display: none; }
+#screen-loadout.is-solo .solo-only { display: flex; }
+
+.bot-count-row {
+  align-items: center; gap: 24px;
+  margin-bottom: 4px;
+}
+.bot-count-label {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 3px;
+  color: rgba(255,255,255,0.5);
+}
+.bot-stepper {
+  display: flex; align-items: center; gap: 0;
+  border: 1px solid rgba(0,255,136,0.3);
+}
+.stepper-btn {
+  width: 38px; height: 38px;
+  background: transparent; border: none;
+  color: var(--green); font-size: 20px; font-weight: 700;
+  cursor: pointer; transition: background 0.12s;
+  font-family: var(--font-ui);
+}
+.stepper-btn:hover { background: rgba(0,255,136,0.1); }
+#lbl-bot-count {
+  min-width: 42px; text-align: center;
+  font-family: var(--font-mono); font-size: 18px; font-weight: 700;
+  color: var(--green); letter-spacing: 2px;
+  border-left: 1px solid rgba(0,255,136,0.2);
+  border-right: 1px solid rgba(0,255,136,0.2);
+  line-height: 38px;
+}
+
 .confirm-btn {
   font-family: var(--font-ui); font-weight: 700;
   font-size: 15px; letter-spacing: 4px;
@@ -460,18 +493,68 @@ html, body {
   background: rgba(0,0,0,0.82);
   display: flex; align-items: center; justify-content: center;
 }
-.plo-box { text-align: center; display: flex; flex-direction: column; gap: 24px; align-items: center; }
+.plo-box {
+  text-align: center; display: flex; flex-direction: column;
+  gap: 20px; align-items: center;
+  background: rgba(5,5,15,0.92);
+  border: 1px solid var(--border);
+  padding: 36px 48px; min-width: 480px;
+}
 .plo-title {
   font-size: 28px; letter-spacing: 10px; font-weight: 700;
   color: var(--green);
   text-shadow: 0 0 20px rgba(0,255,136,0.4);
 }
 .plo-controls {
-  font-family: var(--font-mono); font-size: 12px; letter-spacing: 1px;
-  color: rgba(255,255,255,0.5); line-height: 2;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 1px;
+  color: rgba(255,255,255,0.4); line-height: 2;
 }
 .plo-controls span { color: var(--green); }
-#btn-exit-to-menu { pointer-events: all; }
+
+/* In-game settings panel */
+.ingame-panel {
+  width: 100%; display: flex; flex-direction: column; gap: 16px;
+  border-top: 1px solid rgba(0,255,136,0.15);
+  border-bottom: 1px solid rgba(0,255,136,0.15);
+  padding: 18px 0;
+}
+.ingame-section { display: flex; flex-direction: column; gap: 8px; }
+.ingame-label {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 3px;
+  color: rgba(255,255,255,0.5); text-align: left;
+}
+.ingame-gun-row { display: flex; gap: 10px; }
+.ingame-gun-btn {
+  flex: 1;
+  padding: 8px 0;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(0,255,136,0.25);
+  color: rgba(255,255,255,0.55);
+  font-family: var(--font-ui); font-size: 13px; font-weight: 700; letter-spacing: 2px;
+  cursor: pointer; transition: all 0.15s; pointer-events: all;
+}
+.ingame-gun-btn:hover {
+  background: rgba(0,255,136,0.08);
+  border-color: var(--green); color: var(--green);
+}
+.ingame-gun-btn.active {
+  background: rgba(0,255,136,0.14);
+  border-color: var(--green); color: var(--green);
+}
+
+/* Pause actions row */
+.plo-actions { display: flex; gap: 12px; width: 100%; }
+.plo-actions .confirm-btn { flex: 1; }
+.confirm-btn--secondary {
+  background: transparent !important;
+  border-color: rgba(255,255,255,0.25) !important;
+  color: rgba(255,255,255,0.5) !important;
+}
+.confirm-btn--secondary:hover {
+  border-color: var(--red) !important;
+  color: var(--red) !important;
+}
+#btn-exit-to-menu, #btn-resume { pointer-events: all; }
 
 /* ─── DEATH SCREEN ───────────────────────────────────────── */
 #death-screen {

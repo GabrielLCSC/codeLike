@@ -98,6 +98,17 @@
         </div>
 
       </div>
+
+      <!-- Bot count (solo only) -->
+      <div class="bot-count-row solo-only">
+        <span class="bot-count-label">BOTS IN GAME</span>
+        <div class="bot-stepper">
+          <button class="stepper-btn" id="btn-bots-minus">−</button>
+          <span id="lbl-bot-count">3</span>
+          <button class="stepper-btn" id="btn-bots-plus">+</button>
+        </div>
+      </div>
+
       <button class="confirm-btn" id="btn-confirm-loadout">CONFIRM LOADOUT →</button>
     </div>
 
@@ -241,7 +252,7 @@
   <!-- Pointer-lock / pause -->
   <div id="pointer-lock-overlay" class="hidden">
     <div class="plo-box">
-      <p class="plo-title">CLICK TO PLAY</p>
+      <p class="plo-title" id="plo-title">CLICK TO PLAY</p>
       <div class="plo-controls">
         <span>Z Q S D</span> Move &nbsp;|&nbsp;
         <span>Mouse</span> Aim &nbsp;|&nbsp;
@@ -251,7 +262,27 @@
         <span>Space</span> Jump &nbsp;|&nbsp;
         <span>Shift</span> Sprint
       </div>
-      <button class="confirm-btn" id="btn-exit-to-menu">EXIT TO MENU</button>
+
+      <!-- In-game settings panel -->
+      <div class="ingame-panel">
+        <div class="ingame-section">
+          <span class="ingame-label">WEAPON</span>
+          <div class="ingame-gun-row">
+            <button class="ingame-gun-btn" data-gun="assault_rifle">AR</button>
+            <button class="ingame-gun-btn" data-gun="shotgun">SG</button>
+            <button class="ingame-gun-btn" data-gun="sniper">SR</button>
+          </div>
+        </div>
+        <div class="ingame-section">
+          <span class="ingame-label">SENSITIVITY — <span id="ingame-sens-val">2.0</span></span>
+          <input type="range" id="ingame-sens" class="setting-slider" min="0.5" max="5" step="0.1" value="2.0">
+        </div>
+      </div>
+
+      <div class="plo-actions">
+        <button class="confirm-btn" id="btn-resume">RESUME</button>
+        <button class="confirm-btn confirm-btn--secondary" id="btn-exit-to-menu">EXIT TO MENU</button>
+      </div>
     </div>
   </div>
 

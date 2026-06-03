@@ -99,6 +99,17 @@ export class Game {
     // ── Hit shake ─────────────────────────────────────────
     this._hitShake = 0;   // 0–1, decays each frame
 
+    // ── Multiplayer kill tracking ──────────────────────────
+    /** @type {Set<string>} uids we've shot recently */
+    this._recentlyShot = new Set();
+
+    // ── Kill streak (resets on death, caps pitch at 5) ────
+    this._killStreak = 0;
+
+    // ── Reload animation ──────────────────────────────────
+    this._reloadAnimT      = 0;   // 0→1 progress
+    this._reloadAnimActive = false;
+
     // ── Bullet impact particles ────────────────────────────
     /** @type {{mesh:THREE.Mesh, vel:THREE.Vector3, life:number}[]} */
     this._impactParticles = [];
@@ -126,7 +137,7 @@ export class Game {
     this._setupHUD();
 
     if (this.mode === 'solo') {
-      this._spawnBots(BOT_COUNT);
+      this._spawnBots(this.opts.botCount ?? BOT_COUNT);
     }
 
     if (this.mp) {
@@ -208,7 +219,10 @@ export class Game {
 
     this.controls.addEventListener('lock', () => {
       plo.classList.add('hidden');
-      sound.init(); // AudioContext requires a user gesture — pointer lock counts
+      // After first lock: title becomes "PAUSED" so in-game panel context is clear
+      const title = document.getElementById('plo-title');
+      if (title) title.textContent = 'PAUSED';
+      sound.init();
     });
     this.controls.addEventListener('unlock', () => {
       if (this.alive && this.running) {
@@ -277,6 +291,28 @@ export class Game {
     this.mp.onPlayerUpdate = (uid, data) => {
       if (this.remotePlayers.has(uid)) {
         const rp = this.remotePlayers.get(uid);
+        // Kill confirmation + corpse when they just died
+        if (rp.data.alive && !data.alive) {
+          // Leave a corpse at their last position
+          const corpse = this._createCorpseMesh(rp.mesh.position, rp.mesh.rotation.y, 0x0055cc);
+          this.scene.add(corpse);
+          let t = 0;
+          const iv = setInterval(() => {
+            t += 0.1;
+            if (t > 5) corpse.material.opacity = Math.max(0, 1 - (t - 5) / 3);
+            if (t >= 8) { clearInterval(iv); this.scene.remove(corpse); corpse.material.dispose(); }
+          }, 100);
+
+          if (this._recentlyShot.has(uid)) {
+            this._killStreak++;
+            sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
+            this.kills++;
+            this._updateScoreHUD();
+            this._addKillFeed(this.username, data.name ?? 'Player');
+            this._recentlyShot.delete(uid);
+            if (this.mp) this.mp.updateKills(this.kills, this.deaths);
+          }
+        }
         rp.data = data;
         rp.targetPos.set(data.x, 0, data.z);
         rp.targetRotY = data.rotY ?? 0;
@@ -424,7 +460,7 @@ export class Game {
     if (this.keys.has('Space') && this.onGround) {
       this.velY     = JUMP_FORCE;
       this.onGround = false;
-      sound.play('jump', { volume: 0.5 });
+      sound.play('jump', { volume: 0.18 });
     }
   }
 
@@ -434,7 +470,7 @@ export class Game {
     const newY = this.camera.position.y + this.velY * delta;
     if (newY <= PLAYER_HEIGHT) {
       if (!this.onGround && this.velY < -3) {
-        sound.play('land', { volume: 0.45 + Math.min(0.55, -this.velY / 15) });
+        sound.play('land', { volume: 0.15 + Math.min(0.20, -this.velY / 15) });
       }
       this.camera.position.y = PLAYER_HEIGHT;
       this.velY     = 0;
@@ -498,8 +534,9 @@ export class Game {
         sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
         this._showHitMarker(isHead);
         if (killed) {
+          this._killStreak++;
           this.kills++;
-          sound.play('kill_confirm', { volume: 1.0 });
+          sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
           this._updateScoreHUD();
           this._addKillFeed(this.username, `Bot-${bot.index + 1}`);
           if (this.mp) this.mp.updateKills(this.kills, this.deaths);
@@ -521,6 +558,9 @@ export class Game {
             this.mp.sendHit(uid, dmg);
             sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
             this._showHitMarker(isHead);
+            // Remember we shot this player (for kill confirm)
+            this._recentlyShot.add(uid);
+            setTimeout(() => this._recentlyShot.delete(uid), 5000);
             break;
           }
         }
@@ -545,13 +585,16 @@ export class Game {
     if (this.reloading || this.ammo === this.wDef.magSize || this.reserve === 0) return;
     this.reloading = true;
 
+    // Kick off weapon drop animation
+    this._reloadAnimT      = 0;
+    this._reloadAnimActive = true;
+
     document.getElementById('reload-bar').classList.remove('hidden');
     sound.play('reload', { volume: 0.8 });
-    // Animate fill bar width from 0 → 100% over reloadTime ms
     const fill = document.getElementById('reload-fill-bar');
     fill.style.transition = 'none';
     fill.style.width = '0%';
-    void fill.offsetHeight; // force reflow
+    void fill.offsetHeight;
     fill.style.transition = `width ${this.wDef.reloadTime}ms linear`;
     fill.style.width = '100%';
 
@@ -560,8 +603,9 @@ export class Game {
       const taken  = Math.min(needed, this.reserve);
       this.ammo   += taken;
       this.reserve -= taken;
-      this.reloading = false;
-      bar.classList.add('hidden');
+      this.reloading         = false;
+      this._reloadAnimActive = false;
+      document.getElementById('reload-bar').classList.add('hidden');
       this._updateAmmoHUD();
     }, this.wDef.reloadTime);
   }
@@ -595,6 +639,7 @@ export class Game {
   _die(killerName) {
     this.alive = false;
     this.deaths++;
+    this._killStreak = 0;  // streak resets on death
     if (this.mp) this.mp.updateKills(this.kills, this.deaths);
 
     sound.play('die', { volume: 1.0 });
@@ -717,13 +762,26 @@ export class Game {
     const bobX     = Math.sin(this.bobPhase) * 0.010 * bobAmt;
     const bobY     = Math.abs(Math.cos(this.bobPhase * 0.5)) * 0.007 * bobAmt;
 
+    // Reload animation — weapon drops down and tilts, then returns
+    let reloadDrop = 0;
+    let reloadTilt = 0;
+    if (this._reloadAnimActive) {
+      const totalSec    = (this.wDef.reloadTime / 1000);
+      this._reloadAnimT = Math.min(1, this._reloadAnimT + delta / totalSec);
+      const t           = this._reloadAnimT;
+      // Sinusoidal arc: peaks at t=0.5 (mid-reload) and returns by t=1
+      reloadDrop = Math.sin(t * Math.PI) * 0.22;
+      reloadTilt = Math.sin(t * Math.PI) * 0.45;
+    }
+
     if (this.weaponGroup) {
       this.weaponGroup.position.set(
         0.22 + bobX,
-        -0.28 - bobY,
+        -0.28 - bobY - reloadDrop,
         -0.46 - this.recoilZ
       );
       this.weaponGroup.rotation.x = this.recoilRotX;
+      this.weaponGroup.rotation.z = reloadTilt;
     }
   }
 
@@ -975,6 +1033,55 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════
+  //  IN-GAME CONTROLS (called from pause panel)
+  // ═══════════════════════════════════════════════════════
+
+  /** Switch weapon mid-game (resets ammo to fresh mag). */
+  changeWeapon(key) {
+    if (!WEAPONS[key]) return;
+    this.weaponKey         = key;
+    this.wDef              = WEAPONS[key];
+    this.ammo              = this.wDef.magSize;
+    this.reserve           = this.wDef.reserve;
+    this.reloading         = false;
+    this._reloadAnimActive = false;
+    clearTimeout(this._reloadTimer);
+    document.getElementById('reload-bar').classList.add('hidden');
+
+    // Rebuild 3-D weapon model
+    this.camera.remove(this.weaponGroup);
+    this.weaponGroup = this._buildGunModel(key);
+    this.weaponGroup.position.set(0.22, -0.28, -0.46);
+    this.camera.add(this.weaponGroup);
+
+    // Re-attach muzzle flash
+    const flashMesh  = new THREE.Mesh(
+      new THREE.SphereGeometry(0.05, 6, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffdd44 })
+    );
+    const flashLight = new THREE.PointLight(0xffaa00, 4, 2.5);
+    this.muzzleFlash = new THREE.Group();
+    this.muzzleFlash.add(flashMesh, flashLight);
+    this.muzzleFlash.position.set(0, 0, -0.62);
+    this.muzzleFlash.visible = false;
+    this.weaponGroup.add(this.muzzleFlash);
+
+    document.getElementById('hud-weapon-name').textContent = this.wDef.name;
+    this._updateAmmoHUD();
+  }
+
+  /** Kill-confirm pitch: +0.08 per kill in current life, capped at streak 5. */
+  _killConfirmPitch() {
+    return 1.0 + Math.min(4, Math.max(0, this._killStreak - 1)) * 0.08;
+  }
+
+  /** Update mouse sensitivity live (called from pause panel). */
+  setSensitivity(value) {
+    this.opts.sensitivity = value;
+    if (this.controls) this.controls.pointerSpeed = value * 0.42;
+  }
+
+  // ═══════════════════════════════════════════════════════
   //  GUN MODEL BUILDER
   // ═══════════════════════════════════════════════════════
   _buildGunModel(key) {
@@ -1019,28 +1126,54 @@ export class Game {
   //  REMOTE PLAYER MESH
   // ═══════════════════════════════════════════════════════
   _buildRemotePlayerMesh() {
-    const g = new THREE.Group();
+    const g    = new THREE.Group();
     const bMat = new THREE.MeshLambertMaterial({ color: 0x0055cc });
     const hMat = new THREE.MeshLambertMaterial({ color: 0xc8865a });
+    const gMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
 
+    // Torso
     const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.65, 0.30), bMat);
     torso.position.y = 0.90;
     g.add(torso);
 
+    // Arms
+    for (const side of [-0.37, 0.37]) {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bMat);
+      arm.position.set(side, 0.90, 0);
+      g.add(arm);
+    }
+
+    // Neck
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), hMat);
     neck.position.y = 1.30;
     g.add(neck);
 
+    // Head
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.32, 0.30), hMat);
     head.position.y = 1.52;
     g.add(head);
 
+    // Legs
     for (const side of [-0.13, 0.13]) {
       const leg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bMat);
       leg.position.set(side, 0.35, 0);
       g.add(leg);
     }
 
+    // Gun held in right hand — positive Z = forward (matches player facing direction)
+    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.38), gMat);
+    gun.position.set(0.37, 0.72, 0.24);
+    g.add(gun);
+
     return g;
+  }
+
+  /** Flat corpse mesh for fallen players/bots. */
+  _createCorpseMesh(pos, rotY, color = 0xaa1111) {
+    const mat  = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 1 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 1.50), mat);
+    mesh.position.set(pos.x, 0.09, pos.z);
+    mesh.rotation.y = rotY;
+    return mesh;
   }
 }

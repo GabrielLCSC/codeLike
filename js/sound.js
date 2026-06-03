@@ -141,7 +141,7 @@ class SoundManager {
     }
     this._lastFootstepIdx = idx;
 
-    this.play(this._footstepKeys[idx], { volume: 0.45, pitch: 0.9 + Math.random() * 0.2 });
+    this.play(this._footstepKeys[idx], { volume: 0.20, pitch: 0.9 + Math.random() * 0.2 });
   }
 
   /** Master volume 0–1 */

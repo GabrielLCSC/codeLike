@@ -13,6 +13,7 @@ const DEFAULTS = {
   fov:         75,
   weapon:      'assault_rifle',
   adsMode:     'toggle',   // 'toggle' | 'hold'
+  botCount:    3,
 };
 
 function loadSettings() {
@@ -46,6 +47,15 @@ function applySettingsToUI() {
   // ADS mode buttons
   document.getElementById('ads-toggle-btn').classList.toggle('active', settings.adsMode === 'toggle');
   document.getElementById('ads-hold-btn').classList.toggle('active', settings.adsMode === 'hold');
+
+  // Sync in-game pause panel
+  const igSens = document.getElementById('ingame-sens');
+  if (igSens) igSens.value = settings.sensitivity;
+  const igSensVal = document.getElementById('ingame-sens-val');
+  if (igSensVal) igSensVal.textContent = Number(settings.sensitivity).toFixed(1);
+  document.querySelectorAll('.ingame-gun-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.gun === settings.weapon)
+  );
 }
 
 // ─── GUN SELECTION ───────────────────────────────────────
@@ -97,6 +107,7 @@ function _startGame(mode, mpInstance) {
     fov:         settings.fov,
     username:    settings.username,
     adsMode:     settings.adsMode,
+    botCount:    settings.botCount,
     mp:          mpInstance,
   });
   activeGame.start();
@@ -147,16 +158,33 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('mouseenter', uiHover);
   });
 
+  // ── Bot count stepper ────────────────────────────────
+  function updateBotCountUI() {
+    document.getElementById('lbl-bot-count').textContent = settings.botCount;
+  }
+  updateBotCountUI();
+
+  document.getElementById('btn-bots-minus').addEventListener('click', e => {
+    e.stopPropagation();
+    if (settings.botCount > 1) { settings.botCount--; updateBotCountUI(); saveSettings(settings); }
+  });
+  document.getElementById('btn-bots-plus').addEventListener('click', e => {
+    e.stopPropagation();
+    if (settings.botCount < 10) { settings.botCount++; updateBotCountUI(); saveSettings(settings); }
+  });
+
   // ── Main menu ────────────────────────────────────────
   document.getElementById('btn-solo').addEventListener('click', () => {
     pendingMode = 'solo';
     setupGunCards();
+    document.getElementById('screen-loadout').classList.add('is-solo');
     showScreen('screen-loadout');
   });
 
   document.getElementById('btn-multiplayer').addEventListener('click', () => {
     pendingMode = 'multi';
     setupGunCards();
+    document.getElementById('screen-loadout').classList.remove('is-solo');
     showScreen('screen-loadout');
   });
 
@@ -279,6 +307,39 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-exit-to-menu').addEventListener('click', e => {
     e.stopPropagation();
     exitToMenu();
+  });
+
+  // ── Resume button ─────────────────────────────────────
+  document.getElementById('btn-resume').addEventListener('click', e => {
+    e.stopPropagation();
+    if (activeGame?.alive && activeGame?.running) activeGame.controls.lock();
+  });
+
+  // ── In-game weapon selector ───────────────────────────
+  document.querySelectorAll('.ingame-gun-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const key = btn.dataset.gun;
+      activeGame?.changeWeapon(key);
+      settings.weapon = key;
+      saveSettings(settings);
+      document.querySelectorAll('.ingame-gun-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.gun === key)
+      );
+    });
+  });
+
+  // ── In-game sensitivity slider ────────────────────────
+  const igSens = document.getElementById('ingame-sens');
+  igSens?.addEventListener('click',  e => e.stopPropagation());
+  igSens?.addEventListener('mousedown', e => e.stopPropagation());
+  igSens?.addEventListener('input', e => {
+    e.stopPropagation();
+    const val = parseFloat(igSens.value);
+    document.getElementById('ingame-sens-val').textContent = val.toFixed(1);
+    activeGame?.setSensitivity(val);
+    settings.sensitivity = val;
+    saveSettings(settings);
   });
 });
 

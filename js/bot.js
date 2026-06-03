@@ -182,21 +182,35 @@ export class Bot {
 
   _die() {
     this.alive = false;
-    // Collapse body
-    this.mesh.rotation.z = Math.PI * 0.5;
-    this.mesh.position.y = -0.35;
+    this.mesh.visible = false;
 
-    // Respawn after delay
+    // Leave a flat corpse at the death position
+    const mat = new THREE.MeshLambertMaterial({ color: 0xaa1111, transparent: true, opacity: 1 });
+    const corpse = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 1.50), mat);
+    corpse.position.set(this.mesh.position.x, 0.09, this.mesh.position.z);
+    corpse.rotation.y = this.mesh.rotation.y;
+    this.scene.add(corpse);
+
+    // Fade corpse out (starts at 5 s, gone by 8 s)
+    let t = 0;
+    const iv = setInterval(() => {
+      t += 0.1;
+      if (t > 5) mat.opacity = Math.max(0, 1 - (t - 5) / 3);
+      if (t >= 8) { clearInterval(iv); this.scene.remove(corpse); mat.dispose(); }
+    }, 100);
+
+    // Respawn bot
     setTimeout(() => {
-      this.health    = this.maxHealth;
-      this.alive     = true;
-      this.state     = 'patrol';
-      this.mesh.rotation.z = 0;
-      this.mesh.position.y = 0;
+      this.health = this.maxHealth;
+      this.alive  = true;
+      this.state  = 'patrol';
+      this._mats.forEach(m => { m.emissive?.set(0x000000); });
 
-      const sp = this.map.spawnPoints;
+      const sp   = this.map.spawnPoints;
       const pick = sp[Math.floor(Math.random() * sp.length)];
       this.mesh.position.set(pick.x, 0, pick.z);
+      this.mesh.rotation.set(0, 0, 0);
+      this.mesh.visible = true;
     }, BOT_RESPAWN_MS);
   }
 
@@ -248,9 +262,9 @@ export class Bot {
     helmet.position.y = 1.67;
     group.add(helmet);
 
-    // Gun
+    // Gun — positive Z = forward (toward the player the bot faces)
     const gun = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.35), gunMat);
-    gun.position.set(0.28, 1.10, -0.22);
+    gun.position.set(0.28, 1.10, 0.22);
     group.add(gun);
 
     // Health bar (sprite) — simple plane above head
