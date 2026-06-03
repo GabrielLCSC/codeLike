@@ -37,6 +37,22 @@ const SOUND_FILES = {
   medal_3:       'sounds/medals/medal_3.mp3',
   medal_5:       'sounds/medals/medal_5.mp3',
   medal_10:      'sounds/medals/medal_10.mp3',
+
+  // ── Ambiance — drop files in sounds/ambiance/ ────────────
+  // Main city bed (required for in-game ambiance)
+  ambiance_city: 'sounds/ambiance/ambiance_city.mp3',
+  // Optional extra layers — skipped silently if missing
+  ambiance_wind: 'sounds/ambiance/ambiance_wind.mp3',
+  ambiance_distant: 'sounds/ambiance/ambiance_distant.mp3',
+};
+
+/** Looping ambiance layers played together during a match. */
+const AMBIANCE_PROFILES = {
+  city: [
+    { key: 'ambiance_city',     volume: 0.20 },
+    { key: 'ambiance_wind',     volume: 0.08 },
+    { key: 'ambiance_distant',  volume: 0.12 },
+  ],
 };
 
 class SoundManager {
@@ -46,7 +62,12 @@ class SoundManager {
     this._ctx     = null;
     this._master  = null;   // GainNode — master volume
     this._sfxGain = null;   // GainNode — SFX bus
+    this._ambGain = null;   // GainNode — ambiance bus (loops)
     this._ready   = false;
+
+    /** @type {{ src: AudioBufferSourceNode, gain: GainNode }[]} */
+    this._ambLayers = [];
+    this._ambVolume = 0.45; // user-facing ambiance bus level
 
     // Footstep rate-limiting + anti-repeat
     this._lastFootstep     = 0;
@@ -65,10 +86,13 @@ class SoundManager {
       this._ctx     = new (window.AudioContext || window.webkitAudioContext)();
       this._master  = this._ctx.createGain();
       this._sfxGain = this._ctx.createGain();
+      this._ambGain = this._ctx.createGain();
       this._sfxGain.connect(this._master);
+      this._ambGain.connect(this._master);
       this._master.connect(this._ctx.destination);
       this._master.gain.value  = 1.0;
       this._sfxGain.gain.value = 1.0;
+      this._ambGain.gain.value = this._ambVolume;
       this._ready = true;
       await this._loadAll();
     } catch (e) {
@@ -149,9 +173,122 @@ class SoundManager {
     this.play(this._footstepKeys[idx], { volume: 0.20, pitch: 0.9 + Math.random() * 0.2 });
   }
 
+  /**
+   * Play a sound with approximate 3D spatialization.
+   * Volume falls off quadratically with distance; stereo pan is derived
+   * from the camera's right vector so sounds come from correct L/R.
+   *
+   * @param {string}  key        — key from SOUND_FILES
+   * @param {{ x:number, y:number, z:number }} srcPos  — world-space source
+   * @param {{ position:{x,y,z}, quaternion:{x,y,z,w} }} camera — Three.js camera
+   * @param {object}  [opts]
+   * @param {number}  [opts.volume=1]
+   * @param {number}  [opts.pitch=1]
+   * @param {number}  [opts.maxDist=20]  — distance at which volume reaches 0
+   */
+  playAt(key, srcPos, camera, { volume = 1, pitch = 1, maxDist = 20 } = {}) {
+    if (!this._ready || !this._buffers.has(key)) return;
+
+    const dx = srcPos.x - camera.position.x;
+    const dy = srcPos.y - camera.position.y;
+    const dz = srcPos.z - camera.position.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist >= maxDist) return;
+
+    // Quadratic attenuation
+    const atten = 1 - dist / maxDist;
+    const vol   = volume * atten * atten;
+    if (vol < 0.01) return;
+
+    // Stereo pan: project source direction onto camera's right axis.
+    // Camera right = rotate world-right (1,0,0) by camera quaternion.
+    const q  = camera.quaternion;
+    const rx = 1 - 2 * (q.y * q.y + q.z * q.z);
+    const rz = 2 * (q.x * q.z - q.y * q.w);
+    const horiz = Math.max(dist, 0.1);
+    const pan = Math.max(-1, Math.min(1, (rx * dx + rz * dz) / horiz));
+
+    this._playWithPan(key, vol, pitch + (Math.random() - 0.5) * 0.04, pan);
+  }
+
   /** Master volume 0–1 */
   setVolume(v) {
     if (this._master) this._master.gain.value = Math.max(0, Math.min(1, v));
+  }
+
+  /**
+   * Start looping ambiance for a match (instant on/off).
+   * @param {string} [profile='city'] — key from AMBIANCE_PROFILES
+   */
+  async startAmbiance(profile = 'city') {
+    if (!this._ready) await this.init();
+    if (!this._ready || this._ambLayers.length > 0) return;
+
+    if (this._ctx.state === 'suspended') {
+      try { await this._ctx.resume(); } catch {}
+    }
+
+    const layers = AMBIANCE_PROFILES[profile] ?? AMBIANCE_PROFILES.city;
+
+    for (const layer of layers) {
+      if (!this._buffers.has(layer.key)) continue;
+
+      const src  = this._ctx.createBufferSource();
+      const gain = this._ctx.createGain();
+      src.buffer = this._buffers.get(layer.key);
+      src.loop   = true;
+      gain.gain.value = layer.volume;
+
+      src.connect(gain);
+      gain.connect(this._ambGain);
+      src.start(0);
+
+      this._ambLayers.push({ src, gain });
+    }
+
+    if (this._ambLayers.length > 0) {
+      console.log(`[Sound] Ambiance started (${profile}, ${this._ambLayers.length} layer(s)).`);
+    }
+  }
+
+  /** Stop all ambiance loops immediately. */
+  stopAmbiance() {
+    if (!this._ready || this._ambLayers.length === 0) return;
+
+    for (const { src } of this._ambLayers) {
+      try { src.stop(); } catch {}
+    }
+    this._ambLayers = [];
+  }
+
+  /** Ambiance bus volume 0–1 (does not affect SFX). */
+  setAmbianceVolume(v) {
+    this._ambVolume = Math.max(0, Math.min(1, v));
+    if (this._ambGain) this._ambGain.gain.value = this._ambVolume;
+  }
+
+  // ─── INTERNAL: play with explicit pan ─────────────────────
+  _playWithPan(key, volume, pitch, pan) {
+    if (!this._ready || !this._buffers.has(key)) return;
+    const src      = this._ctx.createBufferSource();
+    const gainNode = this._ctx.createGain();
+    const panNode  = this._ctx.createStereoPanner
+      ? this._ctx.createStereoPanner()
+      : null;
+
+    src.buffer             = this._buffers.get(key);
+    src.playbackRate.value = pitch;
+    gainNode.gain.value    = volume;
+
+    src.connect(gainNode);
+    if (panNode) {
+      panNode.pan.value = pan;
+      gainNode.connect(panNode);
+      panNode.connect(this._sfxGain);
+    } else {
+      gainNode.connect(this._sfxGain);
+    }
+    src.start(0);
   }
 
   // ─── PRIVATE ──────────────────────────────────────────────

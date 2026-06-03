@@ -1,141 +1,282 @@
 // ═══════════════════════════════════════════════════════════
-//  WARFRONT — Procedural dungeon map generator
+//  WARFRONT — City map  (triple-lane, CoD-style)
+//
+//  Rendering strategy:
+//    All boxes sharing the same material are merged into a single
+//    BufferGeometry with mergeGeometries(), giving one draw call
+//    per material (~8 total) instead of one per cell (~1 900).
+//    Three.js frustum-culls each merged mesh against its bounding
+//    sphere, which is tighter than culling individual cell boxes.
 // ═══════════════════════════════════════════════════════════
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MAP_W, MAP_H, CELL_SIZE, WALL_HEIGHT, PLAYER_RADIUS } from './config.js';
+
+const CS = CELL_SIZE;   // 2.2 world units per grid cell
+const WH = WALL_HEIGHT; // 3.2 world units
+
+// ── Grid cell boundaries ─────────────────────────────────────
+// X axis (columns)
+const GX_L1 = 2;   // left lane  — left edge
+const GX_L2 = 13;  // left lane  — right edge  (building left wall starts)
+const GX_M1 = 16;  // building interior — left
+const GX_M2 = 28;  // building interior — right (building right wall starts)
+const GX_R1 = 31;  // right lane — left edge
+const GX_R2 = 42;  // right lane — right edge
+
+// Z axis (rows)
+const GZ_SA1 = 2;   // spawn A — start
+const GZ_SA2 = 9;   // spawn A — end / lanes start
+const GZ_LE  = 35;  // lanes end / spawn B start
+const GZ_SB2 = 41;  // spawn B — end
+
+// Helpers: grid cell → world-space center of that column / row
+const wx = (c) => c * CS;
+const wz = (r) => r * CS;
+
+// Pre-computed world-space values
+const W_LW_X   = (wx(GX_L2) + wx(GX_M1)) * 0.5;  // left building wall centre X
+const W_LW_W   = wx(GX_M1)  - wx(GX_L2);           // left building wall width
+const W_RW_X   = (wx(GX_M2) + wx(GX_R1)) * 0.5;  // right building wall centre X
+const W_RW_W   = wx(GX_R1)  - wx(GX_M2);           // right building wall width
+const W_LANE_Z = (wz(GZ_SA2) + wz(GZ_LE))  * 0.5; // lane centre Z
+const W_LANE_D = wz(GZ_LE)   - wz(GZ_SA2);         // lane depth
+const W_MID_X  = (wx(GX_M1) + wx(GX_M2)) * 0.5;  // building interior centre X
+const W_MID_W  = wx(GX_M2)  - wx(GX_M1);           // building interior width
+const W_L_LX   = (wx(GX_L1) + wx(GX_L2)) * 0.5;  // left lane centre X
+const W_R_LX   = (wx(GX_R1) + wx(GX_R2)) * 0.5;  // right lane centre X
 
 export class MapGenerator {
   constructor() {
-    this.width  = MAP_W;
-    this.height = MAP_H;
-    /** @type {Uint8Array[]} grid[x][z] — 0=wall, 1=floor */
+    this.width  = MAP_W;   // 44
+    this.height = MAP_H;   // 44
+    /** @type {Uint8Array[]} grid[x][z] — 0=solid 1=open */
     this.grid   = [];
-    this.rooms  = [];     // { x,z,w,h }
-    this.spawnPoints = []; // { x,z } world-space centres
-    this.wallMeshes   = []; // wall boxes only — kept for any future LOS use
-    this.staticMeshes = []; // ALL static geometry (walls + floors + ceilings) — for bullet impacts
+    this.rooms  = [];
+    this.spawnPoints  = [];
+    this.wallMeshes   = [];
+    this.staticMeshes = [];
+
+    // Used by buildScene() — filled by _buildFixedMap()
+    this._pillarCells = [];
+    this._coverCells  = [];
+    this._dumpCells   = [];
   }
 
-  // ─── PUBLIC ──────────────────────────────────────────────
   generate() {
     this.grid = Array.from({ length: this.width }, () => new Uint8Array(this.height));
     this.rooms        = [];
     this.spawnPoints  = [];
     this.wallMeshes   = [];
     this.staticMeshes = [];
-
+    this._pillarCells = [];
+    this._coverCells  = [];
+    this._dumpCells   = [];
     this._buildFixedMap();
     return this;
   }
 
-  /** Build Three.js scene geometry from the grid */
+  // ═══════════════════════════════════════════════════════
+  //  SCENE
+  // ═══════════════════════════════════════════════════════
   buildScene(scene) {
-    const wallMat  = new THREE.MeshLambertMaterial({ color: 0x6a6a7a });
-    const floorMat = new THREE.MeshLambertMaterial({ color: 0x3a3a45 });
-    const ceilMat  = new THREE.MeshLambertMaterial({ color: 0x2a2a35 });
+    // Sky + mild distance haze
+    scene.background = new THREE.Color(0x7a9fc2);
+    scene.fog        = new THREE.FogExp2(0x7a9fc2, 0.018);
 
-    const wallGeoTemplate  = new THREE.BoxGeometry(CELL_SIZE, WALL_HEIGHT, CELL_SIZE);
-    const slabGeoTemplate  = new THREE.BoxGeometry(CELL_SIZE, 0.12, CELL_SIZE);
+    // ── Materials ───────────────────────────────────────
+    const M = {
+      asphalt:  new THREE.MeshLambertMaterial({ color: 0x1e1e22 }),
+      concrete: new THREE.MeshLambertMaterial({ color: 0x6a6a72 }),
+      building: new THREE.MeshLambertMaterial({ color: 0x4e4e56 }),
+      intFloor: new THREE.MeshLambertMaterial({ color: 0x38363c }),
+      roof:     new THREE.MeshLambertMaterial({ color: 0x2a2a30 }),
+      cover:    new THREE.MeshLambertMaterial({ color: 0x58504a }),
+      rust:     new THREE.MeshLambertMaterial({ color: 0x3c1e10 }),
+      stripe:   new THREE.MeshLambertMaterial({ color: 0x3a3830 }),
+    };
 
-    for (let x = 0; x < this.width; x++) {
-      for (let z = 0; z < this.height; z++) {
-        const wx = x * CELL_SIZE + CELL_SIZE * 0.5;
-        const wz = z * CELL_SIZE + CELL_SIZE * 0.5;
+    const batches = Object.fromEntries(Object.keys(M).map(k => [k, []]));
 
-        if (this.grid[x][z] === 0) {
-          // ── WALL ──
-          const wall = new THREE.Mesh(wallGeoTemplate, wallMat);
-          wall.position.set(wx, WALL_HEIGHT * 0.5, wz);
-          wall.castShadow = true;
-          wall.receiveShadow = true;
-          scene.add(wall);
-          this.wallMeshes.push(wall);
-          this.staticMeshes.push(wall);
-        } else {
-          // ── FLOOR ──
-          const floor = new THREE.Mesh(slabGeoTemplate, floorMat);
-          floor.position.set(wx, 0, wz);
-          floor.receiveShadow = true;
-          scene.add(floor);
-          this.staticMeshes.push(floor);
+    // Accumulate an axis-aligned box: cx/cz = world centre, y = bottom of box
+    const box = (key, w, h, d, cx, y, cz) => {
+      const g = new THREE.BoxGeometry(w, h, d);
+      g.applyMatrix4(new THREE.Matrix4().makeTranslation(cx, y + h * 0.5, cz));
+      batches[key].push(g);
+    };
 
-          // ── CEILING ──
-          const ceil = new THREE.Mesh(slabGeoTemplate, ceilMat);
-          ceil.position.set(wx, WALL_HEIGHT, wz);
-          scene.add(ceil);
-          this.staticMeshes.push(ceil);
-        }
-      }
+    const mapW  = MAP_W * CS;   // 96.8
+    const mapD  = MAP_H * CS;   // 96.8
+    const mapCX = mapW * 0.5;
+    const mapCZ = mapD * 0.5;
+
+    // ── GROUND ─────────────────────────────────────────
+    box('asphalt', mapW, 0.15, mapD, mapCX, 0, mapCZ);
+
+    // Interior concrete floor (slightly raised so it reads differently)
+    box('intFloor', W_MID_W, 0.08, W_LANE_D, W_MID_X, 0.15, W_LANE_Z);
+
+    // ── OUTER BOUNDARY WALLS (tall — city block silhouette) ─
+    const BT = CS * 2;       // 2-cell thickness
+    const BH = WH + 4.5;     // extra tall
+    box('concrete', BT,   BH, mapD, BT * 0.5,        0, mapCZ);          // left
+    box('concrete', BT,   BH, mapD, mapW - BT * 0.5, 0, mapCZ);          // right
+    box('concrete', mapW, BH, BT,   mapCX, 0, BT * 0.5);                  // back
+    box('concrete', mapW, BH, BT,   mapCX, 0, mapD - BT * 0.5);           // front
+
+    // ── BUILDING SIDE WALLS (separate left/right lane from interior) ─
+    box('building', W_LW_W, WH, W_LANE_D, W_LW_X, 0, W_LANE_Z);
+    box('building', W_RW_W, WH, W_LANE_D, W_RW_X, 0, W_LANE_Z);
+
+    // ── BUILDING ROOF + PARAPET ─────────────────────────
+    const roofX = (wx(GX_L2) + wx(GX_R1)) * 0.5;
+    const roofW = wx(GX_R1) - wx(GX_L2);
+    box('roof', roofW, 0.35, W_LANE_D, roofX, WH, W_LANE_Z);
+
+    // Parapet
+    const PT = 0.25;
+    const PH = 0.55;
+    box('building', roofW,   PH, PT, roofX, WH + 0.35, wz(GZ_SA2) - PT * 0.5);
+    box('building', roofW,   PH, PT, roofX, WH + 0.35, wz(GZ_LE)  + PT * 0.5);
+    box('building', PT, PH, W_LANE_D, wx(GX_L2) + PT * 0.5, WH + 0.35, W_LANE_Z);
+    box('building', PT, PH, W_LANE_D, wx(GX_R1) - PT * 0.5, WH + 0.35, W_LANE_Z);
+
+    // ── INTERIOR CEILING ────────────────────────────────
+    box('roof', W_MID_W - 0.05, 0.12, W_LANE_D - 0.05, W_MID_X, WH - 0.12, W_LANE_Z);
+
+    // ── BUILDING ENTRANCE HEADER BEAMS ──────────────────
+    // Gives the opening a doorway/archway feel without blocking movement
+    const headerH = WH * 0.28;
+    const headerT = CS * 0.5;
+    box('building', W_MID_W, headerH, headerT, W_MID_X, WH - headerH, wz(GZ_SA2) - headerT * 0.5);
+    box('building', W_MID_W, headerH, headerT, W_MID_X, WH - headerH, wz(GZ_LE)  + headerT * 0.5);
+
+    // ── INTERIOR PILLARS ───────────────────────────────
+    for (const [gc, gr] of this._pillarCells) {
+      box('building', CS * 0.7, WH, CS * 0.7, (gc + 0.5) * CS, 0, (gr + 0.5) * CS);
     }
 
-    // ── LIGHTING ──
+    // ── LANE COVER (concrete barriers) ──────────────────
+    for (const [gc, gr] of this._coverCells) {
+      box('cover', CS * 1.1, 1.0, CS * 0.4, (gc + 0.5) * CS, 0, (gr + 0.5) * CS);
+    }
 
-    // Strong ambient so nothing is ever pitch black
-    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
-    scene.add(ambient);
+    // ── DUMPSTERS ───────────────────────────────────────
+    for (const [gc, gr] of this._dumpCells) {
+      box('rust', CS * 0.9, 1.25, CS * 0.55, (gc + 0.5) * CS, 0, (gr + 0.5) * CS);
+    }
 
-    // Hemisphere: warm sky from above, cool bounce from below
-    const hemi = new THREE.HemisphereLight(0x8899bb, 0x334422, 0.6);
-    scene.add(hemi);
+    // ── ROAD MARKINGS (thin decorative strips) ──────────
+    const markW = 0.18;
+    const markH = 0.02;
+    const seg   = W_LANE_D * 0.45;
+    box('stripe', markW, markH, seg, W_L_LX, 0.16, wz(GZ_SA2) + W_LANE_D * 0.27);
+    box('stripe', markW, markH, seg, W_L_LX, 0.16, wz(GZ_SA2) + W_LANE_D * 0.73);
+    box('stripe', markW, markH, seg, W_R_LX, 0.16, wz(GZ_SA2) + W_LANE_D * 0.27);
+    box('stripe', markW, markH, seg, W_R_LX, 0.16, wz(GZ_SA2) + W_LANE_D * 0.73);
 
-    // Bright point light per room
-    this.rooms.forEach((r, i) => {
-      const hues  = [210, 180, 50, 0, 280, 160, 30, 240, 90, 320];
-      const hue   = hues[i % hues.length];
-      const clr   = new THREE.Color(`hsl(${hue},40%,55%)`);
-      const light = new THREE.PointLight(clr, 3.5, CELL_SIZE * 10);
-      light.position.set(
-        (r.x + r.w * 0.5) * CELL_SIZE,
-        WALL_HEIGHT - 0.4,
-        (r.z + r.h * 0.5) * CELL_SIZE
-      );
-      light.castShadow = false;
-      scene.add(light);
+    // ── LAMP POSTS (thin vertical metal pillars) ─────────
+    const lpH = WH + 0.8;
+    const lpS = 0.10;
+    for (const t of [0.22, 0.5, 0.78]) {
+      const lz = wz(GZ_SA2) + W_LANE_D * t;
+      box('concrete', lpS, lpH, lpS, wx(GX_L1) + CS * 0.6, 0, lz);
+      box('concrete', lpS, lpH, lpS, wx(GX_L2) - CS * 0.6, 0, lz);
+      box('concrete', lpS, lpH, lpS, wx(GX_R1) + CS * 0.6, 0, lz);
+      box('concrete', lpS, lpH, lpS, wx(GX_R2) - CS * 0.6, 0, lz);
+    }
 
-      // Small fill light near floor level
-      const fill = new THREE.PointLight(0xffffff, 0.8, CELL_SIZE * 5);
-      fill.position.set(
-        (r.x + r.w * 0.5) * CELL_SIZE,
-        0.5,
-        (r.z + r.h * 0.5) * CELL_SIZE
-      );
-      scene.add(fill);
-    });
+    // ── FLUSH: MERGE & ADD TO SCENE ────────────────────
+    for (const [key, geos] of Object.entries(batches)) {
+      if (geos.length === 0) continue;
+      const merged = mergeGeometries(geos, false);
+      geos.forEach(g => g.dispose());
+      if (!merged) continue;
+      merged.computeBoundingBox();
+      merged.computeBoundingSphere();
+      const mesh = new THREE.Mesh(merged, M[key]);
+      mesh.receiveShadow = (key !== 'stripe');
+      mesh.castShadow    = (key === 'building' || key === 'concrete' || key === 'cover' || key === 'rust');
+      scene.add(mesh);
+      this.staticMeshes.push(mesh);
+      if (key === 'building' || key === 'concrete') this.wallMeshes.push(mesh);
+    }
+
+    this._buildLighting(scene);
   }
 
-  /**
-   * True if the world-space point (x, z) ± PLAYER_RADIUS is inside a wall.
-   * Used for player & bot collision.
-   */
+  // ═══════════════════════════════════════════════════════
+  //  LIGHTING
+  // ═══════════════════════════════════════════════════════
+  _buildLighting(scene) {
+    // Sky ambient
+    scene.add(new THREE.AmbientLight(0xb0c4d8, 0.8));
+
+    // Warm sun from upper-right, angled so it casts shadows into the lanes
+    const sun = new THREE.DirectionalLight(0xfff0dd, 1.1);
+    sun.position.set(40, 60, 20);
+    sun.castShadow = false; // shadow map disabled for performance
+    scene.add(sun);
+
+    // Hemisphere sky / ground bounce
+    scene.add(new THREE.HemisphereLight(0x88aabb, 0x445533, 0.5));
+
+    // ── Building interior — warm sodium ─────────────────
+    for (const t of [0.22, 0.5, 0.78]) {
+      const l = new THREE.PointLight(0xff9933, 3.2, 24);
+      l.position.set(W_MID_X, WH - 0.55, wz(GZ_SA2) + W_LANE_D * t);
+      scene.add(l);
+    }
+
+    // ── Lane street lamps — cool white ──────────────────
+    for (const t of [0.2, 0.5, 0.8]) {
+      const lz = wz(GZ_SA2) + W_LANE_D * t;
+      const ll = new THREE.PointLight(0xddeeff, 2.0, 20);
+      ll.position.set(W_L_LX, WH - 0.2, lz);
+      scene.add(ll);
+      const rl = new THREE.PointLight(0xddeeff, 2.0, 20);
+      rl.position.set(W_R_LX, WH - 0.2, lz);
+      scene.add(rl);
+    }
+
+    // ── Spawn area fill lights ───────────────────────────
+    const mapCX = (MAP_W * CS) * 0.5;
+    const saZ   = (wz(GZ_SA1) + wz(GZ_SA2)) * 0.5;
+    const sbZ   = (wz(GZ_LE)  + wz(GZ_SB2)) * 0.5;
+    const addSpawn = (z) => {
+      const l = new THREE.PointLight(0xccddff, 2.8, 55);
+      l.position.set(mapCX, WH - 0.5, z);
+      scene.add(l);
+    };
+    addSpawn(saZ);
+    addSpawn(sbZ);
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  COLLISION  (grid-based, unchanged API)
+  // ═══════════════════════════════════════════════════════
   isWall(worldX, worldZ) {
     const r = PLAYER_RADIUS;
-    const pts = [
+    return [
       [worldX,     worldZ    ],
       [worldX + r, worldZ    ],
       [worldX - r, worldZ    ],
       [worldX,     worldZ + r],
       [worldX,     worldZ - r],
-    ];
-    return pts.some(([x, z]) => this._cellIsWall(x, z));
+    ].some(([x, z]) => this._cellIsWall(x, z));
   }
 
-  /** Narrower check used for bot movement (smaller radius). */
   isWallThin(worldX, worldZ) {
     const r = 0.28;
-    const pts = [
-      [worldX + r, worldZ],
-      [worldX - r, worldZ],
+    return [
+      [worldX + r, worldZ    ],
+      [worldX - r, worldZ    ],
       [worldX,     worldZ + r],
       [worldX,     worldZ - r],
-    ];
-    return pts.some(([x, z]) => this._cellIsWall(x, z));
+    ].some(([x, z]) => this._cellIsWall(x, z));
   }
 
-  /**
-   * Grid-based line-of-sight ray march between two world-space points.
-   * Fast — no Three.js raycaster needed.
-   */
   hasLOS(x1, z1, x2, z2) {
     const STEPS = 24;
     for (let i = 1; i < STEPS; i++) {
@@ -145,52 +286,81 @@ export class MapGenerator {
     return true;
   }
 
-  // ─── FIXED MAP ───────────────────────────────────────────
-  //
-  //   NW ──── N ──── NE
-  //   |       |       |
-  //   W ───  MID  ─── E
-  //   |       |       |
-  //   SW ──── S ──── SE
-  //
+  // ═══════════════════════════════════════════════════════
+  //  GRID BUILD
+  // ═══════════════════════════════════════════════════════
   _buildFixedMap() {
-    // ── Rooms { x, z, w, h } ──
-    const rooms = [
-      { x: 18, z: 18, w: 8,  h: 8  }, // 0 — Central (mid)
-      { x: 16, z:  2, w: 12, h: 8  }, // 1 — North
-      { x: 16, z: 34, w: 12, h: 8  }, // 2 — South
-      { x:  2, z: 16, w: 8,  h: 12 }, // 3 — West
-      { x: 34, z: 16, w: 8,  h: 12 }, // 4 — East
-      { x:  2, z:  2, w: 8,  h: 8  }, // 5 — NW
-      { x: 34, z:  2, w: 8,  h: 8  }, // 6 — NE
-      { x:  2, z: 34, w: 8,  h: 8  }, // 7 — SW
-      { x: 34, z: 34, w: 8,  h: 8  }, // 8 — SE
+    const span = (x, z, w, h) => this._carveRect({ x, z, w, h });
+
+    // ── Open areas ──────────────────────────────────────
+    span(GX_L1, GZ_SA1, GX_R2 - GX_L1, GZ_SA2 - GZ_SA1);  // spawn A (full width)
+    span(GX_L1, GZ_SA2, GX_L2 - GX_L1, GZ_LE  - GZ_SA2);  // left lane
+    span(GX_M1, GZ_SA2, GX_M2 - GX_M1, GZ_LE  - GZ_SA2);  // building interior
+    span(GX_R1, GZ_SA2, GX_R2 - GX_R1, GZ_LE  - GZ_SA2);  // right lane
+    span(GX_L1, GZ_LE,  GX_R2 - GX_L1, GZ_SB2 - GZ_LE);   // spawn B (full width)
+
+    // ── Interior pillars (re-solidify 1 cell each) ──────
+    // Two columns: just inside each building wall; four rows along depth
+    const pillarGX = [GX_M1 + 1, GX_M2 - 2];
+    const pillarGZ = [
+      GZ_SA2 + 4,
+      GZ_SA2 + 9,
+      GZ_SA2 + 17,
+      GZ_SA2 + 22,
+    ];
+    for (const col of pillarGX) {
+      for (const row of pillarGZ) {
+        if (col >= 0 && col < this.width && row >= 0 && row < this.height) {
+          this.grid[col][row] = 0;
+          this._pillarCells.push([col, row]);
+        }
+      }
+    }
+
+    // ── Lane cover barriers (re-solidify 1 cell each) ───
+    const coverDefs = [
+      // Left lane
+      [5, 13], [5, 22], [5, 30],
+      [9, 17], [9, 26],
+      // Right lane (mirror)
+      [37, 13], [37, 22], [37, 30],
+      [33, 17], [33, 26],
+      // Spawn A covers
+      [6, 5], [22, 5], [36, 5],
+      // Spawn B covers
+      [6, 38], [22, 38], [36, 38],
+    ];
+    for (const [col, row] of coverDefs) {
+      if (col >= 0 && col < this.width && row >= 0 && row < this.height
+          && this.grid[col][row] === 1) {
+        this.grid[col][row] = 0;
+        this._coverCells.push([col, row]);
+      }
+    }
+
+    // ── Dumpsters (visual only — no grid collision) ──────
+    this._dumpCells = [
+      [3, 15], [3, 28],
+      [40, 15], [40, 28],
     ];
 
-    rooms.forEach(r => { this._carveRect(r); this.rooms.push(r); });
+    // ── Spawn points ────────────────────────────────────
+    this.spawnPoints = [
+      // Spawn A — left, mid, right
+      { x: wx(6),  z: wz(4)  },
+      { x: wx(10), z: wz(4)  },
+      { x: wx(22), z: wz(5)  },
+      { x: wx(33), z: wz(4)  },
+      { x: wx(37), z: wz(4)  },
+      // Spawn B — mirrored
+      { x: wx(6),  z: wz(38) },
+      { x: wx(10), z: wz(38) },
+      { x: wx(22), z: wz(38) },
+      { x: wx(33), z: wz(38) },
+      { x: wx(37), z: wz(38) },
+    ];
 
-    // ── Corridors (3 cells wide for comfortable movement) ──
-    // Central ↔ cardinal rooms
-    this._carveRect({ x: 20, z: 10, w: 4, h: 8  }); // N  ↔ Mid
-    this._carveRect({ x: 20, z: 26, w: 4, h: 8  }); // Mid ↔ S
-    this._carveRect({ x: 10, z: 20, w: 8, h: 4  }); // W  ↔ Mid
-    this._carveRect({ x: 26, z: 20, w: 8, h: 4  }); // Mid ↔ E
-
-    // Corner rooms ↔ cardinal rooms
-    this._carveRect({ x:  9, z:  4, w: 7,  h: 3 }); // NW ↔ N  (horizontal)
-    this._carveRect({ x: 28, z:  4, w: 6,  h: 3 }); // N  ↔ NE
-    this._carveRect({ x:  9, z: 37, w: 7,  h: 3 }); // SW ↔ S
-    this._carveRect({ x: 28, z: 37, w: 6,  h: 3 }); // S  ↔ SE
-    this._carveRect({ x:  4, z:  9, w: 3,  h: 7 }); // NW ↔ W  (vertical)
-    this._carveRect({ x:  4, z: 28, w: 3,  h: 6 }); // W  ↔ SW
-    this._carveRect({ x: 37, z:  9, w: 3,  h: 7 }); // NE ↔ E
-    this._carveRect({ x: 37, z: 28, w: 3,  h: 6 }); // E  ↔ SE
-
-    // ── Spawn points (one per room) ──
-    this.spawnPoints = rooms.map(r => ({
-      x: (r.x + r.w * 0.5) * CELL_SIZE,
-      z: (r.z + r.h * 0.5) * CELL_SIZE,
-    }));
+    this.rooms = [];
   }
 
   _carveRect({ x, z, w, h }) {
@@ -201,8 +371,8 @@ export class MapGenerator {
   }
 
   _cellIsWall(worldX, worldZ) {
-    const cx = Math.floor(worldX / CELL_SIZE);
-    const cz = Math.floor(worldZ / CELL_SIZE);
+    const cx = Math.floor(worldX / CS);
+    const cz = Math.floor(worldZ / CS);
     if (cx < 0 || cx >= this.width || cz < 0 || cz >= this.height) return true;
     return this.grid[cx][cz] === 0;
   }

@@ -233,6 +233,23 @@ html, body {
   line-height: 38px;
 }
 
+/* ── Difficulty selector ─────────────────────────────── */
+.diff-btns {
+  display: flex; gap: 0;
+  border: 1px solid rgba(0,255,136,0.3);
+}
+.diff-btn {
+  padding: 0 14px; height: 38px; min-width: 52px;
+  background: transparent; border: none;
+  color: rgba(255,255,255,0.4);
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 2px; font-weight: 700;
+  cursor: pointer; transition: background 0.12s, color 0.12s;
+  border-right: 1px solid rgba(0,255,136,0.15);
+}
+.diff-btn:last-child { border-right: none; }
+.diff-btn:hover { background: rgba(0,255,136,0.07); color: rgba(255,255,255,0.7); }
+.diff-btn.active { background: rgba(0,255,136,0.15); color: var(--green); }
+
 .confirm-btn {
   font-family: var(--font-ui); font-weight: 700;
   font-size: 15px; letter-spacing: 4px;

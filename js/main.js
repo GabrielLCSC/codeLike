@@ -14,6 +14,7 @@ const DEFAULTS = {
   weapon:      'assault_rifle',
   adsMode:     'toggle',   // 'toggle' | 'hold'
   botCount:    3,
+  botLevel:    'corporal', // 'private' | 'corporal' | 'commando' | 'veteran'
 };
 
 function loadSettings() {
@@ -108,6 +109,7 @@ function _startGame(mode, mpInstance) {
     username:    settings.username,
     adsMode:     settings.adsMode,
     botCount:    settings.botCount,
+    botLevel:    settings.botLevel,
     mp:          mpInstance,
   });
   activeGame.start();
@@ -172,6 +174,23 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-bots-plus').addEventListener('click', e => {
     e.stopPropagation();
     if (settings.botCount < 10) { settings.botCount++; updateBotCountUI(); saveSettings(settings); }
+  });
+
+  // ── Bot difficulty selector ───────────────────────────
+  function applyDiffToUI() {
+    document.querySelectorAll('.diff-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.diff === settings.botLevel);
+    });
+  }
+  applyDiffToUI();
+
+  document.querySelectorAll('.diff-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      settings.botLevel = btn.dataset.diff;
+      applyDiffToUI();
+      saveSettings(settings);
+    });
   });
 
   // ── Main menu ────────────────────────────────────────

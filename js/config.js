@@ -37,8 +37,9 @@ export const WEAPONS = {
     zoom:        1.2,
     recoilZ:     0.022,
     recoilRotX:  0.05,
-    barrelColor: 0x1a1a1a,
-    bodyColor:   0x252525,
+    bodyColor:   0x1e1e22,   // dark charcoal polymer
+    barrelColor: 0x111114,   // near-black metal
+    stockColor:  0x1a1a1e,   // same polymer as body
   },
   shotgun: {
     name:        'SHOTGUN',
@@ -53,8 +54,9 @@ export const WEAPONS = {
     zoom:        1.0,
     recoilZ:     0.038,
     recoilRotX:  0.07,
-    barrelColor: 0x2a1800,
-    bodyColor:   0x3a2800,
+    bodyColor:   0x262624,   // dark gunmetal
+    barrelColor: 0x111111,   // black steel
+    stockColor:  0x3a2010,   // dark walnut wood
   },
   sniper: {
     name:        'SNIPER RIFLE',
@@ -69,21 +71,66 @@ export const WEAPONS = {
     zoom:        4.0,
     recoilZ:     0.045,
     recoilRotX:  0.09,
-    barrelColor: 0x111111,
-    bodyColor:   0x1c2418,
+    bodyColor:   0x1c1e1a,   // dark military green-black chassis
+    barrelColor: 0x0f0f12,   // very dark steel
+    stockColor:  0x181c18,   // dark tactical stock
+    scopeColor:  0x111114,   // scope black
   },
 };
 
 // ─── BOT CONFIG ───────────────────────────────────────────────
-export const BOT_COUNT        = 3;
-export const BOT_HEALTH       = 100;
-export const BOT_SPEED        = 3.4;
-export const BOT_DETECT_RANGE = 14;   // world units
-export const BOT_ATTACK_RANGE = 11;   // world units
-export const BOT_DAMAGE       = 14;   // HP per hit
-export const BOT_SHOOT_MIN    = 1100; // ms between shots (min)
-export const BOT_SHOOT_JITTER = 800;  // extra random ms
-export const BOT_RESPAWN_MS   = 14000;// ms before bot respawns
+export const BOT_COUNT      = 3;
+export const BOT_HEALTH     = 100;
+export const BOT_DAMAGE     = 14;      // HP per hit (all difficulties)
+export const BOT_RESPAWN_MS = 14000;   // ms before bot respawns
+
+/** Difficulty configs — passed directly to Bot constructor as `cfg`. */
+export const BOT_LEVELS = {
+  private: {
+    label:       'PRIVATE',
+    speed:        2.6,
+    detectRange:  9,
+    attackRange:  7,
+    hitBase:      0.18,   // accuracy at close range (scales with distance)
+    shootMin:     1900,   // ms between shots (base)
+    shootJitter:  1200,
+    seeksCover:   false,
+    strafes:      false,
+  },
+  corporal: {
+    label:       'CORPORAL',
+    speed:        3.2,
+    detectRange:  14,
+    attackRange:  11,
+    hitBase:      0.35,
+    shootMin:     1100,
+    shootJitter:  800,
+    seeksCover:   false,
+    strafes:      true,
+  },
+  commando: {
+    label:       'COMMANDO',
+    speed:        3.9,
+    detectRange:  18,
+    attackRange:  14,
+    hitBase:      0.55,
+    shootMin:     700,
+    shootJitter:  500,
+    seeksCover:   true,
+    strafes:      true,
+  },
+  veteran: {
+    label:       'VETERAN',
+    speed:        4.6,
+    detectRange:  22,
+    attackRange:  17,
+    hitBase:      0.72,
+    shootMin:     450,
+    shootJitter:  280,
+    seeksCover:   true,
+    strafes:      true,
+  },
+};
 
 // ─── MULTIPLAYER ─────────────────────────────────────────────
 export const SYNC_INTERVAL    = 50;   // ms between position syncs

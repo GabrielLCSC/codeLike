@@ -99,13 +99,23 @@
 
       </div>
 
-      <!-- Bot count -->
+      <!-- Bot count + difficulty -->
       <div class="bot-count-row">
         <span class="bot-count-label">BOTS IN GAME</span>
         <div class="bot-stepper">
           <button class="stepper-btn" id="btn-bots-minus">−</button>
           <span id="lbl-bot-count">3</span>
           <button class="stepper-btn" id="btn-bots-plus">+</button>
+        </div>
+      </div>
+
+      <div class="bot-count-row">
+        <span class="bot-count-label">BOT LEVEL</span>
+        <div class="diff-btns" id="diff-btn-group">
+          <button class="diff-btn" data-diff="private">PVT</button>
+          <button class="diff-btn active" data-diff="corporal">CPL</button>
+          <button class="diff-btn" data-diff="commando">CMD</button>
+          <button class="diff-btn" data-diff="veteran">VET</button>
         </div>
       </div>
 

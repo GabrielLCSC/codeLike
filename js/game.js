@@ -11,7 +11,7 @@ import {
   PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
-  HEADSHOT_MULT, WEAPONS, BOT_COUNT, SYNC_INTERVAL,
+  HEADSHOT_MULT, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL,
 } from './config.js';
 import { MapGenerator }  from './mapgen.js';
 import { Bot }           from './bot.js';
@@ -30,6 +30,7 @@ export class Game {
    *   adsMode:     'toggle'|'hold',
    *   username:    string,
    *   botCount?:   number,
+   *   botLevel?:   'private'|'corporal'|'commando'|'veteran',
    *   mp?:         import('./multiplayer.js').MultiplayerManager,
    * }} opts
    */
@@ -121,6 +122,7 @@ export class Game {
   }
 
   stop() {
+    sound.stopAmbiance();
     this.running = false;
     this.controls?.unlock();
     this._unbindInput();
@@ -198,7 +200,7 @@ export class Game {
       plo.classList.add('hidden');
       const title = document.getElementById('plo-title');
       if (title) title.textContent = 'PAUSED';
-      sound.init();
+      sound.init().then(() => sound.startAmbiance('city'));
     });
     this.controls.addEventListener('unlock', () => {
       if (this.alive && this.running) plo.classList.remove('hidden');
@@ -231,10 +233,23 @@ export class Game {
   }
 
   _spawnBots(count) {
-    const sp = this.map.spawnPoints;
+    const sp  = this.map.spawnPoints;
+    const cfg = BOT_LEVELS[this.opts.botLevel ?? 'corporal'] ?? BOT_LEVELS.corporal;
     for (let i = 0; i < count; i++) {
-      this.bots.push(new Bot(this.scene, sp[(i + 1) % sp.length], this.map, i));
+      const onSound = (key, pos, opts) => this._playWorldSound(key, pos, opts);
+      this.bots.push(new Bot(this.scene, sp[(i + 1) % sp.length], this.map, i, cfg, onSound));
     }
+  }
+
+  /** Play a sound in world space — routes through sound.playAt() with the camera as the listener. */
+  _playWorldSound(key, pos, opts = {}) {
+    sound.playAt(key, pos, this.camera, opts);
+  }
+
+  /** Pick a random footstep key from the loaded variants. */
+  _randomFootstepKey() {
+    const keys = ['footstep', 'footstep2', 'footstep3', 'footstep4'];
+    return keys[Math.floor(Math.random() * keys.length)];
   }
 
   _setupMultiplayer() {
@@ -654,6 +669,15 @@ export class Game {
       L.rightArm.rotation.x = -swing * amp;
       L.leftLeg.rotation.x  = -swing * amp * 0.85;
       L.rightLeg.rotation.x =  swing * amp * 0.85;
+
+      // Audible footsteps — rate-limited per remote player
+      rp._stepTimer = (rp._stepTimer ?? 0) - delta;
+      if (rp._stepTimer <= 0) {
+        rp._stepTimer = isRunning ? 0.28 : 0.44;
+        this._playWorldSound(this._randomFootstepKey(), rp.mesh.position, {
+          volume: 0.82, maxDist: 24,
+        });
+      }
     } else {
       // Idle: smoothly return all limbs to neutral
       const t = Math.min(1, delta * 6);
