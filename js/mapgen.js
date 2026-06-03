@@ -25,9 +25,7 @@ export class MapGenerator {
     this.wallMeshes   = [];
     this.staticMeshes = [];
 
-    this._placeRooms(10);
-    this._connectRooms();
-    this._findSpawnPoints();
+    this._buildFixedMap();
     return this;
   }
 
@@ -147,77 +145,59 @@ export class MapGenerator {
     return true;
   }
 
-  // ─── PRIVATE GENERATION ──────────────────────────────────
-  _placeRooms(target) {
-    for (let attempt = 0; attempt < target * 20 && this.rooms.length < target; attempt++) {
-      const w = 4 + Math.floor(Math.random() * 6);
-      const h = 4 + Math.floor(Math.random() * 6);
-      const x = 2 + Math.floor(Math.random() * (this.width  - w - 3));
-      const z = 2 + Math.floor(Math.random() * (this.height - h - 3));
-      const room = { x, z, w, h };
+  // ─── FIXED MAP ───────────────────────────────────────────
+  //
+  //   NW ──── N ──── NE
+  //   |       |       |
+  //   W ───  MID  ─── E
+  //   |       |       |
+  //   SW ──── S ──── SE
+  //
+  _buildFixedMap() {
+    // ── Rooms { x, z, w, h } ──
+    const rooms = [
+      { x: 18, z: 18, w: 8,  h: 8  }, // 0 — Central (mid)
+      { x: 16, z:  2, w: 12, h: 8  }, // 1 — North
+      { x: 16, z: 34, w: 12, h: 8  }, // 2 — South
+      { x:  2, z: 16, w: 8,  h: 12 }, // 3 — West
+      { x: 34, z: 16, w: 8,  h: 12 }, // 4 — East
+      { x:  2, z:  2, w: 8,  h: 8  }, // 5 — NW
+      { x: 34, z:  2, w: 8,  h: 8  }, // 6 — NE
+      { x:  2, z: 34, w: 8,  h: 8  }, // 7 — SW
+      { x: 34, z: 34, w: 8,  h: 8  }, // 8 — SE
+    ];
 
-      if (!this._overlaps(room)) {
-        this._carveRoom(room);
-        this.rooms.push(room);
-      }
-    }
-  }
+    rooms.forEach(r => { this._carveRect(r); this.rooms.push(r); });
 
-  _overlaps(room) {
-    return this.rooms.some(r =>
-      room.x < r.x + r.w + 2 && room.x + room.w + 2 > r.x &&
-      room.z < r.z + r.h + 2 && room.z + room.h + 2 > r.z
-    );
-  }
+    // ── Corridors (3 cells wide for comfortable movement) ──
+    // Central ↔ cardinal rooms
+    this._carveRect({ x: 20, z: 10, w: 4, h: 8  }); // N  ↔ Mid
+    this._carveRect({ x: 20, z: 26, w: 4, h: 8  }); // Mid ↔ S
+    this._carveRect({ x: 10, z: 20, w: 8, h: 4  }); // W  ↔ Mid
+    this._carveRect({ x: 26, z: 20, w: 8, h: 4  }); // Mid ↔ E
 
-  _carveRoom({ x, z, w, h }) {
-    for (let cx = x; cx < x + w; cx++)
-      for (let cz = z; cz < z + h; cz++)
-        this.grid[cx][cz] = 1;
-  }
+    // Corner rooms ↔ cardinal rooms
+    this._carveRect({ x:  9, z:  4, w: 7,  h: 3 }); // NW ↔ N  (horizontal)
+    this._carveRect({ x: 28, z:  4, w: 6,  h: 3 }); // N  ↔ NE
+    this._carveRect({ x:  9, z: 37, w: 7,  h: 3 }); // SW ↔ S
+    this._carveRect({ x: 28, z: 37, w: 6,  h: 3 }); // S  ↔ SE
+    this._carveRect({ x:  4, z:  9, w: 3,  h: 7 }); // NW ↔ W  (vertical)
+    this._carveRect({ x:  4, z: 28, w: 3,  h: 6 }); // W  ↔ SW
+    this._carveRect({ x: 37, z:  9, w: 3,  h: 7 }); // NE ↔ E
+    this._carveRect({ x: 37, z: 28, w: 3,  h: 6 }); // E  ↔ SE
 
-  _connectRooms() {
-    for (let i = 1; i < this.rooms.length; i++) {
-      const a = this.rooms[i - 1];
-      const b = this.rooms[i];
-      const ax = Math.floor(a.x + a.w * 0.5);
-      const az = Math.floor(a.z + a.h * 0.5);
-      const bx = Math.floor(b.x + b.w * 0.5);
-      const bz = Math.floor(b.z + b.h * 0.5);
-
-      if (Math.random() < 0.5) {
-        this._carveH(ax, bx, az);
-        this._carveV(az, bz, bx);
-      } else {
-        this._carveV(az, bz, ax);
-        this._carveH(ax, bx, bz);
-      }
-    }
-  }
-
-  _carveH(x1, x2, z) {
-    const mn = Math.min(x1, x2); const mx = Math.max(x1, x2);
-    for (let x = mn; x <= mx; x++) {
-      if (x < 0 || x >= this.width) continue;
-      if (z     >= 0 && z     < this.height) this.grid[x][z]     = 1;
-      if (z + 1 >= 0 && z + 1 < this.height) this.grid[x][z + 1] = 1;
-    }
-  }
-
-  _carveV(z1, z2, x) {
-    const mn = Math.min(z1, z2); const mx = Math.max(z1, z2);
-    for (let z = mn; z <= mx; z++) {
-      if (z < 0 || z >= this.height) continue;
-      if (x     >= 0 && x     < this.width) this.grid[x][z]     = 1;
-      if (x + 1 >= 0 && x + 1 < this.width) this.grid[x + 1][z] = 1;
-    }
-  }
-
-  _findSpawnPoints() {
-    this.spawnPoints = this.rooms.map(r => ({
+    // ── Spawn points (one per room) ──
+    this.spawnPoints = rooms.map(r => ({
       x: (r.x + r.w * 0.5) * CELL_SIZE,
       z: (r.z + r.h * 0.5) * CELL_SIZE,
     }));
+  }
+
+  _carveRect({ x, z, w, h }) {
+    for (let cx = x; cx < x + w; cx++)
+      for (let cz = z; cz < z + h; cz++)
+        if (cx >= 0 && cx < this.width && cz >= 0 && cz < this.height)
+          this.grid[cx][cz] = 1;
   }
 
   _cellIsWall(worldX, worldZ) {

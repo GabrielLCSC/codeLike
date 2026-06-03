@@ -242,6 +242,20 @@ html, body {
   background: var(--green); border-radius: 50%;
 }
 
+/* ─── TOGGLE BUTTONS ────────────────────────────────────── */
+.toggle-row { display: flex; gap: 10px; }
+.toggle-btn {
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px;
+  padding: 10px 20px;
+  background: transparent; border: 1px solid rgba(255,255,255,0.2);
+  color: rgba(255,255,255,0.5); cursor: pointer; transition: all 0.15s;
+}
+.toggle-btn.active {
+  border-color: var(--green); color: var(--green);
+  background: rgba(0,255,136,0.08);
+}
+.toggle-btn:hover:not(.active) { border-color: rgba(255,255,255,0.4); color: #fff; }
+
 /* ─── MULTIPLAYER ────────────────────────────────────────── */
 #screen-multiplayer { padding-top: 80px; }
 .mp-split {
@@ -322,14 +336,35 @@ html, body {
 #hit-marker {
   position: absolute; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
-  font-size: 22px; font-weight: 700;
+  width: 28px; height: 28px;
   pointer-events: none; z-index: 51;
-  color: #fff;
-  animation: hit-flash 0.2s ease-out forwards;
+  animation: hit-flash 0.22s ease-out forwards;
 }
-#hit-marker.hit::before  { content: '×'; }
-#hit-marker.headshot::before { content: '✦'; color: var(--amber); }
-@keyframes hit-flash { 0% { opacity: 1; transform: translate(-50%,-50%) scale(1.4); } 100% { opacity: 0; transform: translate(-50%,-50%) scale(1); } }
+/* Four diagonal lines — each is a short rotated bar */
+#hit-marker .hm-tl,
+#hit-marker .hm-tr,
+#hit-marker .hm-bl,
+#hit-marker .hm-br {
+  position: absolute;
+  width: 11px; height: 3px;
+  border-radius: 1px;
+  background: #fff;
+}
+#hit-marker .hm-tl { top:  4px; left:  4px; transform: rotate(-45deg); transform-origin: right center; }
+#hit-marker .hm-tr { top:  4px; right: 4px; transform: rotate( 45deg); transform-origin: left  center; }
+#hit-marker .hm-bl { bottom: 4px; left:  4px; transform: rotate( 45deg); transform-origin: right center; }
+#hit-marker .hm-br { bottom: 4px; right: 4px; transform: rotate(-45deg); transform-origin: left  center; }
+
+/* Headshot: amber colour */
+#hit-marker.headshot .hm-tl,
+#hit-marker.headshot .hm-tr,
+#hit-marker.headshot .hm-bl,
+#hit-marker.headshot .hm-br { background: var(--amber); }
+
+@keyframes hit-flash {
+  0%   { opacity: 1; transform: translate(-50%,-50%) scale(1.5); }
+  100% { opacity: 0; transform: translate(-50%,-50%) scale(1);   }
+}
 
 /* ─── HEALTH ─────────────────────────────────────────────── */
 #hud-health {

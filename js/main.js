@@ -4,6 +4,7 @@
 
 import { Game }               from './game.js';
 import { MultiplayerManager } from './multiplayer.js';
+import { sound }              from './sound.js';
 
 // ─── SETTINGS (persisted in localStorage) ───────────────
 const DEFAULTS = {
@@ -11,6 +12,7 @@ const DEFAULTS = {
   sensitivity: 2.0,
   fov:         75,
   weapon:      'assault_rifle',
+  adsMode:     'toggle',   // 'toggle' | 'hold'
 };
 
 function loadSettings() {
@@ -41,6 +43,9 @@ function applySettingsToUI() {
   document.getElementById('inp-fov').value      = settings.fov;
   document.getElementById('lbl-sens').textContent = Number(settings.sensitivity).toFixed(1);
   document.getElementById('lbl-fov').textContent  = settings.fov;
+  // ADS mode buttons
+  document.getElementById('ads-toggle-btn').classList.toggle('active', settings.adsMode === 'toggle');
+  document.getElementById('ads-hold-btn').classList.toggle('active', settings.adsMode === 'hold');
 }
 
 // ─── GUN SELECTION ───────────────────────────────────────
@@ -91,6 +96,7 @@ function _startGame(mode, mpInstance) {
     sensitivity: settings.sensitivity,
     fov:         settings.fov,
     username:    settings.username,
+    adsMode:     settings.adsMode,
     mp:          mpInstance,
   });
   activeGame.start();
@@ -133,6 +139,14 @@ document.addEventListener('DOMContentLoaded', () => {
   applySettingsToUI();
   setupGunCards();
 
+  // UI sound helper — init AudioContext on first menu click
+  function uiClick() { sound.init(); sound.play('ui_click', { volume: 0.5 }); }
+  function uiHover() { sound.play('ui_hover', { volume: 0.25 }); }
+  document.querySelectorAll('.menu-btn, .confirm-btn, .back-btn').forEach(btn => {
+    btn.addEventListener('click',      uiClick);
+    btn.addEventListener('mouseenter', uiHover);
+  });
+
   // ── Main menu ────────────────────────────────────────
   document.getElementById('btn-solo').addEventListener('click', () => {
     pendingMode = 'solo';
@@ -174,6 +188,16 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('inp-fov').addEventListener('input', function () {
     document.getElementById('lbl-fov').textContent = this.value;
+  });
+
+  // ADS mode toggle
+  document.getElementById('ads-toggle-btn').addEventListener('click', () => {
+    settings.adsMode = 'toggle';
+    applySettingsToUI();
+  });
+  document.getElementById('ads-hold-btn').addEventListener('click', () => {
+    settings.adsMode = 'hold';
+    applySettingsToUI();
   });
 
   document.getElementById('btn-save-settings').addEventListener('click', () => {

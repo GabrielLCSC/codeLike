@@ -121,6 +121,13 @@
           <label class="setting-label">FIELD OF VIEW — <span id="lbl-fov">75</span>°</label>
           <input type="range" id="inp-fov" class="setting-slider" min="60" max="110" step="5" value="75">
         </div>
+        <div class="setting-group">
+          <label class="setting-label">AIM (RIGHT CLICK)</label>
+          <div class="toggle-row">
+            <button class="toggle-btn active" id="ads-toggle-btn" data-value="toggle">CLICK TO TOGGLE</button>
+            <button class="toggle-btn" id="ads-hold-btn" data-value="hold">HOLD TO AIM</button>
+          </div>
+        </div>
       </div>
       <button class="confirm-btn" id="btn-save-settings">SAVE SETTINGS →</button>
     </div>
@@ -180,8 +187,13 @@
       <div class="ch-l"></div>
     </div>
 
-    <!-- Hit marker -->
-    <div id="hit-marker" class="hidden"></div>
+    <!-- Hit marker (4-line cross, COD style) -->
+    <div id="hit-marker" class="hidden">
+      <div class="hm-tl"></div>
+      <div class="hm-tr"></div>
+      <div class="hm-bl"></div>
+      <div class="hm-br"></div>
+    </div>
 
     <!-- Bottom-left: health -->
     <div id="hud-health">

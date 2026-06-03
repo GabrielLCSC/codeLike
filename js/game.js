@@ -13,7 +13,8 @@ import {
   BOT_COUNT, SYNC_INTERVAL,
 } from './config.js';
 import { MapGenerator } from './mapgen.js';
-import { Bot } from './bot.js';
+import { Bot }          from './bot.js';
+import { sound }        from './sound.js';
 
 export class Game {
   /**
@@ -207,6 +208,7 @@ export class Game {
 
     this.controls.addEventListener('lock', () => {
       plo.classList.add('hidden');
+      sound.init(); // AudioContext requires a user gesture — pointer lock counts
     });
     this.controls.addEventListener('unlock', () => {
       if (this.alive && this.running) {
@@ -411,6 +413,9 @@ export class Game {
       if (!this.map.isWall(cx.x, nz)) this.camera.position.z = nz;
 
       this.isMoving = true;
+      if (this.onGround) {
+        sound.playFootstep(performance.now() / 1000, sprint);
+      }
     } else {
       this.isMoving = false;
     }
@@ -419,6 +424,7 @@ export class Game {
     if (this.keys.has('Space') && this.onGround) {
       this.velY     = JUMP_FORCE;
       this.onGround = false;
+      sound.play('jump', { volume: 0.5 });
     }
   }
 
@@ -427,6 +433,9 @@ export class Game {
 
     const newY = this.camera.position.y + this.velY * delta;
     if (newY <= PLAYER_HEIGHT) {
+      if (!this.onGround && this.velY < -3) {
+        sound.play('land', { volume: 0.45 + Math.min(0.55, -this.velY / 15) });
+      }
       this.camera.position.y = PLAYER_HEIGHT;
       this.velY     = 0;
       this.onGround = true;
@@ -457,11 +466,14 @@ export class Game {
     this.recoilZ    = this.wDef.recoilZ;
     this.recoilRotX = this.wDef.recoilRotX;
 
+    sound.playShoot(this.weaponKey, { isADS: this.isADS });
     this._showMuzzleFlash();
     this._updateAmmoHUD();
 
     if (this.ammo <= 0 && this.reserve > 0) {
       this.reload();
+    } else if (this.ammo === 0 && this.reserve === 0) {
+      sound.play('empty_click', { volume: 0.6 });
     }
   }
 
@@ -483,9 +495,11 @@ export class Game {
         const isHead = hit.object.position.y > 1.3;
         const dmg    = isHead ? this.wDef.damage * HEADSHOT_MULT : this.wDef.damage;
         const killed = bot.takeDamage(dmg);
+        sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
         this._showHitMarker(isHead);
         if (killed) {
           this.kills++;
+          sound.play('kill_confirm', { volume: 1.0 });
           this._updateScoreHUD();
           this._addKillFeed(this.username, `Bot-${bot.index + 1}`);
           if (this.mp) this.mp.updateKills(this.kills, this.deaths);
@@ -505,6 +519,7 @@ export class Game {
             const isHead = hit.object.position.y > 1.3;
             const dmg    = isHead ? this.wDef.damage * HEADSHOT_MULT : this.wDef.damage;
             this.mp.sendHit(uid, dmg);
+            sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
             this._showHitMarker(isHead);
             break;
           }
@@ -519,6 +534,7 @@ export class Game {
       const sh     = staticHits[0];
       const normal = sh.face.normal.clone().transformDirection(sh.object.matrixWorld);
       this._spawnImpact(sh.point, normal);
+      sound.play('bullet_wall', { volume: 0.5, pitch: 0.85 + Math.random() * 0.3 });
     }
   }
 
@@ -530,6 +546,7 @@ export class Game {
     this.reloading = true;
 
     document.getElementById('reload-bar').classList.remove('hidden');
+    sound.play('reload', { volume: 0.8 });
     // Animate fill bar width from 0 → 100% over reloadTime ms
     const fill = document.getElementById('reload-fill-bar');
     fill.style.transition = 'none';
@@ -559,6 +576,7 @@ export class Game {
 
     // Hit shake — heavier hits shake harder
     this._hitShake = Math.min(1.0, this._hitShake + amount / 25);
+    sound.play('hurt', { volume: Math.min(1, amount / 30) });
 
     // Flash vignette
     const vign = document.getElementById('damage-vignette');
@@ -579,6 +597,7 @@ export class Game {
     this.deaths++;
     if (this.mp) this.mp.updateKills(this.kills, this.deaths);
 
+    sound.play('die', { volume: 1.0 });
     this.controls.unlock();
     document.getElementById('pointer-lock-overlay').classList.add('hidden');
     document.getElementById('scope-overlay').classList.add('hidden');
@@ -854,12 +873,21 @@ export class Game {
       }
     }
     if (e.button === 2) {
-      this._toggleADS();
+      if (this.opts.adsMode === 'hold') {
+        // Activate ADS immediately on press
+        if (!this.isADS) this._toggleADS();
+      } else {
+        this._toggleADS();
+      }
     }
   }
 
   _handleMouseUp(e) {
     if (e.button === 0) this.mouseDown = false;
+    if (e.button === 2 && this.opts.adsMode === 'hold') {
+      // Release ADS when button is released
+      if (this.isADS) this._toggleADS();
+    }
   }
 
   _handleRMB(e) {
