@@ -19,6 +19,11 @@ import { sound }         from './sound.js';
 import { HUD }           from './hud.js';
 import { WeaponSystem }  from './weapon.js';
 import { ParticleSystem } from './particles.js';
+import {
+  buildCharacterMesh,
+  updateCharacterAnimation,
+  billboardCharacterLabels,
+} from './character.js';
 
 export class Game {
   /**
@@ -88,7 +93,9 @@ export class Game {
     this.mouseDown = false;
 
     // Raycaster shared across all shots
-    this.raycaster = new THREE.Raycaster();
+    this.raycaster    = new THREE.Raycaster();
+    this._hitWorldPos = new THREE.Vector3();
+    this._playerSpawnSlot = 0;
     this.raycaster.far = 80;
 
     // Bound handlers stored for clean removal
@@ -108,6 +115,7 @@ export class Game {
     this._initRenderer();
     this._initScene();
     this._initMap();
+    this._initPlayerSpawnSlot();
     this._initPlayer();
     this._initSystems();
     this._bindInput();
@@ -187,9 +195,8 @@ export class Game {
     this.controls.pointerSpeed = this.opts.sensitivity * 0.42;
     this.scene.add(this.camera);
 
-    const sp   = this.map.spawnPoints;
-    const pick = sp[Math.floor(Math.random() * sp.length)];
-    this.camera.position.set(pick.x, PLAYER_HEIGHT, pick.z);
+    const sp = this._getSpawnPos(this._playerSpawnSlot);
+    this._placePlayerAt(sp.x, sp.z);
 
     const plo = document.getElementById('pointer-lock-overlay');
     plo.addEventListener('click', () => {
@@ -232,12 +239,52 @@ export class Game {
     this.particles = new ParticleSystem(this.scene);
   }
 
+  _spawnHalf() {
+    return Math.ceil(this.map.spawnPoints.length / 2);
+  }
+
+  /** Unique spawn slot for the local player (spawn zone A). */
+  _initPlayerSpawnSlot() {
+    const half = this._spawnHalf();
+    if (this.mp) {
+      const humans = [...this.mp.players.keys()].sort();
+      const idx    = humans.indexOf(this.mp.uid);
+      this._playerSpawnSlot = idx >= 0 ? idx % half : 0;
+    } else {
+      this._playerSpawnSlot = 0;
+    }
+  }
+
+  _getSpawnPos(slotIndex) {
+    const pts = this.map.spawnPoints;
+    const i   = ((slotIndex % pts.length) + pts.length) % pts.length;
+    return { x: pts[i].x, z: pts[i].z };
+  }
+
+  /** Nudge position if the exact spawn cell overlaps a wall / another body. */
+  _placePlayerAt(x, z) {
+    const offsets = [
+      [0, 0], [0.7, 0], [-0.7, 0], [0, 0.7], [0, -0.7],
+      [1.0, 1.0], [-1.0, 1.0], [1.0, -1.0], [-1.0, -1.0],
+    ];
+    for (const [dx, dz] of offsets) {
+      const tx = x + dx;
+      const tz = z + dz;
+      if (!this.map.isWall(tx, tz)) {
+        this.camera.position.set(tx, PLAYER_HEIGHT, tz);
+        return;
+      }
+    }
+    this.camera.position.set(x, PLAYER_HEIGHT, z);
+  }
+
   _spawnBots(count) {
-    const sp  = this.map.spawnPoints;
-    const cfg = BOT_LEVELS[this.opts.botLevel ?? 'corporal'] ?? BOT_LEVELS.corporal;
+    const cfg  = BOT_LEVELS[this.opts.botLevel ?? 'corporal'] ?? BOT_LEVELS.corporal;
+    const half = this._spawnHalf();
     for (let i = 0; i < count; i++) {
+      const sp      = this._getSpawnPos(half + (i % half)); // spawn zone B — opposite side
       const onSound = (key, pos, opts) => this._playWorldSound(key, pos, opts);
-      this.bots.push(new Bot(this.scene, sp[(i + 1) % sp.length], this.map, i, cfg, onSound));
+      this.bots.push(new Bot(this.scene, sp, this.map, i, cfg, onSound));
     }
   }
 
@@ -269,7 +316,7 @@ export class Game {
 
         if (wasAlive && !data.alive) {
           // Drop a corpse at last known position
-          const corpse = this._makeCorpse(rp.mesh.position, rp.mesh.rotation.y, 0x0055cc);
+          const corpse = this._makeCorpse(rp.mesh.position, rp.mesh.rotation.y, 0x3a4038);
           this.scene.add(corpse);
           this._fadeAndRemove(corpse, 5, 8);
 
@@ -279,16 +326,15 @@ export class Game {
           }
         }
       } else {
-        const { mesh, limbs } = this._buildRemotePlayerMesh(data.name ?? 'Player');
+        const { mesh, rig } = this._buildRemotePlayerMesh(data.name ?? 'Player');
         mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
           mesh,
-          limbs,
+          rig,
           data,
           targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
-          animPhase:  0,
           prevPos:    new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
         });
       }
@@ -456,6 +502,25 @@ export class Game {
     if (this.weapon.ammo <= 0 && this.weapon.reserve > 0) this.weapon.reload();
   }
 
+  /** Walk parent chain to find which character root was hit. */
+  _resolveCharacterHit(hitObject, entries) {
+    let node = hitObject;
+    while (node) {
+      for (const entry of entries) {
+        if (node === entry.mesh) return entry;
+      }
+      node = node.parent;
+    }
+    return null;
+  }
+
+  /** Headshot uses world-space Y (nested limb local Y is unreliable). */
+  _isHeadHit(hitObject) {
+    if (hitObject.material?.depthTest === false) return false;
+    hitObject.getWorldPosition(this._hitWorldPos);
+    return this._hitWorldPos.y > 1.52;
+  }
+
   _doShot() {
     const s = this.weapon.effectiveSpread;
     this.raycaster.setFromCamera(
@@ -468,15 +533,16 @@ export class Game {
     const wallDist = wallHits.length > 0 ? wallHits[0].distance : Infinity;
 
     // ── Bots ────────────────────────────────────────────
-    const botHits = this.raycaster.intersectObjects(
-      this.bots.filter(b => b.alive).map(b => b.mesh), true,
-    );
-    if (botHits.length > 0 && botHits[0].distance < wallDist) {
-      const hit = botHits[0];
-      const bot = this.bots.find(b => b.mesh === hit.object || b.mesh === hit.object.parent);
-      if (!bot?.alive) return;
+    const botEntries = this.bots.filter(b => b.alive).map(b => ({ mesh: b.mesh, ref: b }));
+    const botHits    = this.raycaster.intersectObjects(botEntries.map(e => e.mesh), true);
+    for (const hit of botHits) {
+      if (hit.distance >= wallDist) break;
+      if (hit.object.material?.depthTest === false) continue;
+      const entry = this._resolveCharacterHit(hit.object, botEntries);
+      if (!entry?.ref?.alive) continue;
 
-      const isHead = hit.object.position.y > 1.3;
+      const bot    = entry.ref;
+      const isHead = this._isHeadHit(hit.object);
       const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
       const killed = bot.takeDamage(dmg);
 
@@ -493,23 +559,29 @@ export class Game {
 
     // ── Remote players ───────────────────────────────────
     if (this.mode === 'multi' && this.remotePlayers.size > 0) {
-      const rHits = this.raycaster.intersectObjects(
-        [...this.remotePlayers.values()].map(r => r.mesh), true,
-      );
-      if (rHits.length > 0 && rHits[0].distance < wallDist) {
-        const hit = rHits[0];
-        for (const [uid, rp] of this.remotePlayers) {
-          if (rp.mesh === hit.object || rp.mesh === hit.object.parent) {
-            const isHead = hit.object.position.y > 1.3;
-            const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
-            this.mp.sendHit(uid, dmg);
-            sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
-            this.hud.showHitMarker(isHead);
-            this.hud.showScorePopup(isHead ? '+75' : '+50');
-            this._recentlyShot.add(uid);
-            setTimeout(() => this._recentlyShot.delete(uid), 5000);
-            break;
-          }
+      const rpEntries = [...this.remotePlayers.values()]
+        .filter(rp => rp.mesh.visible)
+        .map(rp => ({ mesh: rp.mesh, ref: rp }));
+      const rHits = this.raycaster.intersectObjects(rpEntries.map(e => e.mesh), true);
+      for (const hit of rHits) {
+        if (hit.distance >= wallDist) break;
+        if (hit.object.material?.depthTest === false) continue;
+        const entry = this._resolveCharacterHit(hit.object, rpEntries);
+        if (!entry) continue;
+
+        const rp     = entry.ref;
+        const isHead = this._isHeadHit(hit.object);
+        const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
+
+        for (const [uid, candidate] of this.remotePlayers) {
+          if (candidate !== rp) continue;
+          this.mp.sendHit(uid, dmg);
+          sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
+          this.hud.showHitMarker(isHead);
+          this.hud.showScorePopup(isHead ? '+75' : '+50');
+          this._recentlyShot.add(uid);
+          setTimeout(() => this._recentlyShot.delete(uid), 5000);
+          break;
         }
         return;
       }
@@ -587,9 +659,8 @@ export class Game {
     this.alive  = true;
     this.weapon.equip(this.weapon.key);   // resets ammo via equip, fires callbacks
 
-    const sp   = this.map.spawnPoints;
-    const pick = sp[Math.floor(Math.random() * sp.length)];
-    this.camera.position.set(pick.x, PLAYER_HEIGHT, pick.z);
+    const sp = this._getSpawnPos(this._playerSpawnSlot);
+    this._placePlayerAt(sp.x, sp.z);
 
     this.hud.setHealth(100);
     this.hud.setScore(this.kills, this.deaths);
@@ -627,65 +698,40 @@ export class Game {
       rp.mesh.position.lerp(rp.targetPos, 0.25);
       rp.mesh.rotation.y = THREE.MathUtils.lerp(rp.mesh.rotation.y, rp.targetRotY, 0.25);
 
-      // Billboard name labels (depthTest=false) toward local camera
-      rp.mesh.traverse(c => {
-        if (c.isMesh && c.material?.depthTest === false) c.lookAt(this.camera.position);
-      });
-
-      // Limb animation
-      if (rp.limbs && rp.prevPos) {
+      // Name labels + animation
+      if (rp.rig && rp.prevPos) {
         this._animateRemotePlayer(rp, delta);
       }
+      billboardCharacterLabels(rp.mesh, this.camera);
     });
   }
 
   /**
-   * Drive limb swing for a remote player based on how much their mesh
-   * moved this frame (lerp-smoothed) and whether they are airborne.
+   * Drive animation for a remote player from movement / jump state.
    */
   _animateRemotePlayer(rp, delta) {
-    const L = rp.limbs;
     const moved = rp.prevPos.distanceTo(rp.mesh.position);
     rp.prevPos.copy(rp.mesh.position);
 
-    // Detect airborne: y position is synced from Firebase
-    const groundY = 0;
+    const groundY    = 0;
     const isAirborne = (rp.data.y ?? groundY) > groundY + 0.35;
 
+    let pose = 'idle';
     if (isAirborne) {
-      // Jump pose: arms spread forward, legs pulled back slightly
-      L.leftArm.rotation.x  = THREE.MathUtils.lerp(L.leftArm.rotation.x,   0.55, 0.18);
-      L.rightArm.rotation.x = THREE.MathUtils.lerp(L.rightArm.rotation.x,  0.55, 0.18);
-      L.leftLeg.rotation.x  = THREE.MathUtils.lerp(L.leftLeg.rotation.x,  -0.30, 0.18);
-      L.rightLeg.rotation.x = THREE.MathUtils.lerp(L.rightLeg.rotation.x, -0.30, 0.18);
+      pose = 'jump';
     } else if (moved > 0.005) {
-      // Walking / running — threshold tuned to lerp-damped displacement
-      const isRunning = moved > 0.022;
-      const freq = isRunning ? 10   : 5.5;
-      const amp  = isRunning ? 0.68 : 0.42;
-      rp.animPhase += delta * freq;
-      const swing = Math.sin(rp.animPhase);
-      L.leftArm.rotation.x  =  swing * amp;
-      L.rightArm.rotation.x = -swing * amp;
-      L.leftLeg.rotation.x  = -swing * amp * 0.85;
-      L.rightLeg.rotation.x =  swing * amp * 0.85;
+      pose = moved > 0.022 ? 'run' : 'walk';
 
-      // Audible footsteps — rate-limited per remote player
       rp._stepTimer = (rp._stepTimer ?? 0) - delta;
       if (rp._stepTimer <= 0) {
-        rp._stepTimer = isRunning ? 0.28 : 0.44;
+        rp._stepTimer = pose === 'run' ? 0.28 : 0.44;
         this._playWorldSound(this._randomFootstepKey(), rp.mesh.position, {
           volume: 0.82, maxDist: 24,
         });
       }
-    } else {
-      // Idle: smoothly return all limbs to neutral
-      const t = Math.min(1, delta * 6);
-      L.leftArm.rotation.x  = THREE.MathUtils.lerp(L.leftArm.rotation.x,  0, t);
-      L.rightArm.rotation.x = THREE.MathUtils.lerp(L.rightArm.rotation.x, 0, t);
-      L.leftLeg.rotation.x  = THREE.MathUtils.lerp(L.leftLeg.rotation.x,  0, t);
-      L.rightLeg.rotation.x = THREE.MathUtils.lerp(L.rightLeg.rotation.x, 0, t);
     }
+
+    updateCharacterAnimation(rp.rig, delta, pose);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -787,52 +833,12 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _buildRemotePlayerMesh(playerName = 'Player') {
-    const g    = new THREE.Group();
-    const bMat = new THREE.MeshLambertMaterial({ color: 0x0055cc });
-    const hMat = new THREE.MeshLambertMaterial({ color: 0xc8865a });
-    const gMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
-
-    const box = (mat, [w, h, d], [x, y, z]) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      m.position.set(x, y, z);
-      g.add(m);
-      return m;
-    };
-
-    box(bMat, [0.55, 0.65, 0.30], [0,     0.90, 0]);  // torso
-    const leftArm  = box(bMat, [0.16, 0.50, 0.16], [-0.37, 0.90, 0]);
-    const rightArm = box(bMat, [0.16, 0.50, 0.16], [ 0.37, 0.90, 0]);
-    const leftLeg  = box(bMat, [0.20, 0.55, 0.22], [-0.13, 0.35, 0]);
-    const rightLeg = box(bMat, [0.20, 0.55, 0.22], [ 0.13, 0.35, 0]);
-    box(hMat, [0.34, 0.32, 0.30], [0,     1.52, 0]);  // head
-    box(gMat, [0.06, 0.06, 0.38], [0.37,  0.72, 0.24]); // gun (positive Z = forward)
-
-    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), hMat);
-    neck.position.y = 1.30;
-    g.add(neck);
-
-    // Name label — billboarded each frame in _updateRemotePlayers
-    const nc  = document.createElement('canvas');
-    nc.width  = 256; nc.height = 48;
-    const ctx = nc.getContext('2d');
-    ctx.font       = 'bold 22px "Rajdhani", sans-serif';
-    ctx.fillStyle  = '#88bbff';
-    ctx.textAlign  = 'center';
-    ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 6;
-    ctx.fillText(playerName, 128, 34);
-
-    const label = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.0, 0.19),
-      new THREE.MeshBasicMaterial({
-        map: new THREE.CanvasTexture(nc),
-        transparent: true, depthTest: false, side: THREE.DoubleSide,
-      }),
-    );
-    label.name = 'nameSprite';
-    label.position.y = 2.28;
-    g.add(label);
-
-    return { mesh: g, limbs: { leftArm, rightArm, leftLeg, rightLeg } };
+    const { mesh, rig } = buildCharacterMesh({
+      team: 'ally',
+      name: playerName,
+      showHealthBar: false,
+    });
+    return { mesh, rig };
   }
 
   /** Flat body mesh. @param {THREE.Vector3} pos @param {number} rotY @param {number} color */

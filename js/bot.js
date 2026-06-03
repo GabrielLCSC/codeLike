@@ -7,6 +7,14 @@ import {
   CELL_SIZE,
   BOT_HEALTH, BOT_DAMAGE, BOT_RESPAWN_MS,
 } from './config.js';
+import {
+  buildCharacterMesh,
+  updateCharacterAnimation,
+  resetCharacterPose,
+  triggerCharacterRecoil,
+  billboardCharacterLabels,
+  botStateToPose,
+} from './character.js';
 
 // Fallback config (corporal level) — used when no cfg is passed
 const DEFAULT_CFG = {
@@ -74,7 +82,6 @@ export class Bot {
     this.mesh.position.set(spawnPos.x, 0, spawnPos.z);
     scene.add(this.mesh);
 
-    // Collect all materials for the hit-flash effect
     this._mats = [];
     this.mesh.traverse(c => { if (c.isMesh) this._mats.push(c.material); });
     this._flashTimer = null;
@@ -187,6 +194,7 @@ export class Bot {
 
       // Audible gunshot at bot position so player hears nearby fire
       this._playSound('ar_shoot', { volume: 0.78, maxDist: 35 });
+      triggerCharacterRecoil(this.rig);
 
       if (Math.random() < hitChance) {
         onHitPlayer(BOT_DAMAGE, `Bot-${this.index + 1}`);
@@ -370,7 +378,7 @@ export class Bot {
     this.mesh.visible = false;
 
     // Drop a flat corpse that fades out after 5 s
-    const mat    = new THREE.MeshLambertMaterial({ color: 0xaa1111, transparent: true, opacity: 1 });
+    const mat    = new THREE.MeshLambertMaterial({ color: 0x3a3f38, transparent: true, opacity: 1 });
     const corpse = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 1.50), mat);
     corpse.position.set(this.mesh.position.x, 0.09, this.mesh.position.z);
     corpse.rotation.y = this.mesh.rotation.y;
@@ -391,14 +399,10 @@ export class Bot {
       this._coverTarget = null;
       this._coverTimer  = 0;
 
-      const sp   = this.map.spawnPoints;
-      const pick = sp[Math.floor(Math.random() * sp.length)];
-      this.mesh.position.set(pick.x, 0, pick.z);
+      const sp   = this.spawnPos;
+      this.mesh.position.set(sp.x, 0, sp.z);
       this.mesh.rotation.set(0, 0, 0);
-      if (this._limbs) {
-        Object.values(this._limbs).forEach(l => { l.rotation.x = 0; });
-      }
-      this._animPhase = 0;
+      resetCharacterPose(this.rig);
       this.mesh.visible = true;
     }, BOT_RESPAWN_MS);
   }
@@ -406,139 +410,32 @@ export class Bot {
   // ─── ANIMATION ────────────────────────────────────────────
 
   _animate(delta) {
-    const L = this._limbs;
-    if (!L) return;
-
-    if (this.state === 'attack') {
-      // Aiming pose: both arms raised forward
-      L.leftArm.rotation.x  = THREE.MathUtils.lerp(L.leftArm.rotation.x,  -0.65, 0.12);
-      L.rightArm.rotation.x = THREE.MathUtils.lerp(L.rightArm.rotation.x, -0.65, 0.12);
-      L.leftLeg.rotation.x  = THREE.MathUtils.lerp(L.leftLeg.rotation.x,    0,   0.12);
-      L.rightLeg.rotation.x = THREE.MathUtils.lerp(L.rightLeg.rotation.x,   0,   0.12);
-    } else {
-      // Walk / run gait — cover and chase share the running frequency
-      const isRunning = (this.state === 'chase' || this.state === 'cover');
-      const freq = isRunning ? 10   : 5.5;
-      const amp  = isRunning ? 0.68 : 0.42;
-      this._animPhase += delta * freq;
-      const swing = Math.sin(this._animPhase);
-      L.leftArm.rotation.x  =  swing * amp;
-      L.rightArm.rotation.x = -swing * amp;
-      L.leftLeg.rotation.x  = -swing * amp * 0.85;
-      L.rightLeg.rotation.x =  swing * amp * 0.85;
-    }
+    const bx = this.mesh.position.x;
+    const bz = this.mesh.position.z;
+    const atCover = this.state === 'cover' && this._coverTarget &&
+      Math.hypot(bx - this._coverTarget.x, bz - this._coverTarget.z) < 0.75;
+    updateCharacterAnimation(this.rig, delta, botStateToPose(this.state, atCover));
   }
 
-  // ─── MESH CONSTRUCTION ────────────────────────────────────
-
   _createMesh() {
-    const group = new THREE.Group();
-
-    const bodyMat   = new THREE.MeshLambertMaterial({ color: 0xaa1111 });
-    const headMat   = new THREE.MeshLambertMaterial({ color: 0xc8865a });
-    const helmetMat = new THREE.MeshLambertMaterial({ color: 0x2a2a18 });
-    const gearMat   = new THREE.MeshLambertMaterial({ color: 0x1a2810 });
-    const gunMat    = new THREE.MeshLambertMaterial({ color: 0x111111 });
-
-    // Torso
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.65, 0.30), bodyMat);
-    torso.position.y = 0.90;
-    group.add(torso);
-
-    // Tactical vest
-    const vest = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.50, 0.33), gearMat);
-    vest.position.y = 0.95;
-    group.add(vest);
-
-    // Legs
-    const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bodyMat);
-    leftLeg.position.set(-0.13, 0.35, 0);
-    group.add(leftLeg);
-
-    const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bodyMat);
-    rightLeg.position.set(0.13, 0.35, 0);
-    group.add(rightLeg);
-
-    // Arms
-    const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bodyMat);
-    leftArm.position.set(-0.37, 0.90, 0);
-    group.add(leftArm);
-
-    const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bodyMat);
-    rightArm.position.set(0.37, 0.90, 0);
-    group.add(rightArm);
-
-    // Store limb refs for animation
-    this._limbs     = { leftArm, rightArm, leftLeg, rightLeg };
-    this._animPhase = 0;
-
-    // Neck
-    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), headMat);
-    neck.position.y = 1.30;
-    group.add(neck);
-
-    // Head
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.32, 0.30), headMat);
-    head.position.y = 1.52;
-    group.add(head);
-
-    // Helmet
-    const helmet = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.22, 0.34), helmetMat);
-    helmet.position.y = 1.67;
-    group.add(helmet);
-
-    // Gun (positive Z = forward, visible from front)
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.35), gunMat);
-    gun.position.set(0.28, 1.10, 0.22);
-    group.add(gun);
-
-    // Name label (canvas sprite, billboarded each frame)
-    const nameCanvas = document.createElement('canvas');
-    nameCanvas.width = 256; nameCanvas.height = 48;
-    const nc = nameCanvas.getContext('2d');
-    nc.font      = 'bold 22px "Rajdhani", sans-serif';
-    nc.fillStyle = '#ff8888';
-    nc.textAlign = 'center';
-    nc.shadowColor = 'rgba(0,0,0,0.8)';
-    nc.shadowBlur  = 6;
-    nc.fillText(`BOT-${this.index + 1}`, 128, 34);
-    const nameTex = new THREE.CanvasTexture(nameCanvas);
-    const nameSprite = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.0, 0.19),
-      new THREE.MeshBasicMaterial({ map: nameTex, transparent: true, depthTest: false, side: THREE.DoubleSide })
-    );
-    nameSprite.name       = 'nameSprite';
-    nameSprite.position.y = 2.28;
-    group.add(nameSprite);
-
-    // Health bar background
-    const barBg = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.5, 0.06),
-      new THREE.MeshBasicMaterial({ color: 0x330000, depthTest: false })
-    );
-    barBg.position.y = 2.1;
-    group.add(barBg);
-
-    this._healthBar = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.5, 0.06),
-      new THREE.MeshBasicMaterial({ color: 0x00ff44, depthTest: false })
-    );
-    this._healthBar.position.set(0, 2.1, 0.001);
-    group.add(this._healthBar);
-
-    return group;
+    const { mesh, rig, healthBar } = buildCharacterMesh({
+      team: 'enemy',
+      name: `BOT-${this.index + 1}`,
+      showHealthBar: true,
+    });
+    this.rig         = rig;
+    this._healthBar  = healthBar;
+    return mesh;
   }
 
   /** Call each frame to keep health bar and name label facing the camera. */
   updateHealthBar(camera) {
-    if (!this._healthBar) return;
-    if (this.alive) {
-      const ratio = Math.max(0, this.health / this.maxHealth);
-      this._healthBar.scale.x    = ratio;
-      this._healthBar.position.x = (ratio - 1) * 0.25;
-    }
-    this.mesh.traverse(c => {
-      if (c.isMesh && c.material?.depthTest === false) c.lookAt(camera.position);
-    });
+    if (!this.alive) return;
+    billboardCharacterLabels(
+      this.mesh,
+      camera,
+      this._healthBar,
+      Math.max(0, this.health / this.maxHealth),
+    );
   }
 }
