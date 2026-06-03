@@ -89,14 +89,7 @@ export const BOT_RESPAWN_MS   = 14000;// ms before bot respawns
 export const SYNC_INTERVAL    = 50;   // ms between position syncs
 export const MAX_PLAYERS      = 4;
 
-// ─── FIREBASE CONFIG — replace with your project values ──────
-//   Instructions at end of index.html / README
-export const FIREBASE_CONFIG = {
-  apiKey:            "AIzaSyBg01SnpeNT_pJAOjmxqPLlwphKD351Vvk",
-  authDomain:        "cod-test-cfea4.firebaseapp.com",
-  databaseURL:       "https://cod-test-cfea4-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId:         "cod-test-cfea4",
-  storageBucket:     "cod-test-cfea4.firebasestorage.app",
-  messagingSenderId: "69706825984",
-  appId:             "1:69706825984:web:e311db9a6759dda001b3e5",
-};
+// ─── FIREBASE CONFIG ──────────────────────────────────────────
+// Loaded from the gitignored js/firebase-config.js
+// Copy js/firebase-config.example.js → js/firebase-config.js to set up.
+export { FIREBASE_CONFIG } from './firebase-config.js';

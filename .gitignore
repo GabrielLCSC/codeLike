@@ -1,0 +1,9 @@
+# Firebase credentials — never commit this
+js/firebase-config.js
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
