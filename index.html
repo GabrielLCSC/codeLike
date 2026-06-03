@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WARFRONT — Browser FPS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Firebase compat (must load before modules) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+
+  <!-- Three.js importmap -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════ MENU OVERLAY ═══ -->
+  <div id="menu-overlay">
+
+    <!-- MAIN SCREEN -->
+    <div id="screen-main" class="screen active">
+      <div class="scanlines"></div>
+      <div class="menu-content">
+        <div class="title-block">
+          <div class="title-pre">TACTICAL BROWSER</div>
+          <h1 class="game-title">WARFRONT</h1>
+          <div class="title-line"></div>
+        </div>
+        <nav class="menu-nav">
+          <button class="menu-btn" id="btn-solo">
+            <span class="btn-bracket">[</span> SOLO MODE <span class="btn-bracket">]</span>
+          </button>
+          <button class="menu-btn" id="btn-multiplayer">
+            <span class="btn-bracket">[</span> MULTIPLAYER <span class="btn-bracket">]</span>
+          </button>
+          <button class="menu-btn menu-btn--secondary" id="btn-settings">
+            <span class="btn-bracket">[</span> SETTINGS <span class="btn-bracket">]</span>
+          </button>
+        </nav>
+        <div class="menu-footer">ZQSD TO MOVE · MOUSE TO AIM · CLICK TO SHOOT · R RELOAD · RMB SCOPE</div>
+      </div>
+    </div>
+
+    <!-- LOADOUT / GUN SELECT SCREEN -->
+    <div id="screen-loadout" class="screen">
+      <div class="screen-header">
+        <button class="back-btn" id="btn-back-loadout">← BACK</button>
+        <h2>SELECT LOADOUT</h2>
+        <div class="header-rule"></div>
+      </div>
+      <div class="gun-grid">
+
+        <div class="gun-card" data-gun="assault_rifle">
+          <div class="gun-silhouette ar"></div>
+          <h3>ASSAULT RIFLE</h3>
+          <p class="gun-desc">Versatile full-auto, reliable at all ranges.</p>
+          <div class="gun-stats">
+            <div class="stat-row"><span>DMG</span><div class="stat-track"><div class="stat-fill" style="width:50%"></div></div><span>50</span></div>
+            <div class="stat-row"><span>ROF</span><div class="stat-track"><div class="stat-fill" style="width:75%"></div></div><span>75</span></div>
+            <div class="stat-row"><span>RNG</span><div class="stat-track"><div class="stat-fill" style="width:62%"></div></div><span>62</span></div>
+          </div>
+          <div class="gun-ammo">30 / 120</div>
+        </div>
+
+        <div class="gun-card" data-gun="shotgun">
+          <div class="gun-silhouette sg"></div>
+          <h3>SHOTGUN</h3>
+          <p class="gun-desc">Devastating up close. 8-pellet spread.</p>
+          <div class="gun-stats">
+            <div class="stat-row"><span>DMG</span><div class="stat-track"><div class="stat-fill" style="width:90%"></div></div><span>90</span></div>
+            <div class="stat-row"><span>ROF</span><div class="stat-track"><div class="stat-fill" style="width:18%"></div></div><span>18</span></div>
+            <div class="stat-row"><span>RNG</span><div class="stat-track"><div class="stat-fill" style="width:28%"></div></div><span>28</span></div>
+          </div>
+          <div class="gun-ammo">6 / 30</div>
+        </div>
+
+        <div class="gun-card" data-gun="sniper">
+          <div class="gun-silhouette sn"></div>
+          <h3>SNIPER RIFLE</h3>
+          <p class="gun-desc">One-shot power. 4× scope. Bolt-action.</p>
+          <div class="gun-stats">
+            <div class="stat-row"><span>DMG</span><div class="stat-track"><div class="stat-fill" style="width:100%"></div></div><span>100</span></div>
+            <div class="stat-row"><span>ROF</span><div class="stat-track"><div class="stat-fill" style="width:8%"></div></div><span>8</span></div>
+            <div class="stat-row"><span>RNG</span><div class="stat-track"><div class="stat-fill" style="width:100%"></div></div><span>100</span></div>
+          </div>
+          <div class="gun-ammo">5 / 25</div>
+        </div>
+
+      </div>
+      <button class="confirm-btn" id="btn-confirm-loadout">CONFIRM LOADOUT →</button>
+    </div>
+
+    <!-- SETTINGS SCREEN -->
+    <div id="screen-settings" class="screen">
+      <div class="screen-header">
+        <button class="back-btn" id="btn-back-settings">← BACK</button>
+        <h2>SETTINGS</h2>
+        <div class="header-rule"></div>
+      </div>
+      <div class="settings-body">
+        <div class="setting-group">
+          <label class="setting-label">USERNAME</label>
+          <input type="text" id="inp-username" class="setting-input" maxlength="16" placeholder="Ghost">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">MOUSE SENSITIVITY — <span id="lbl-sens">2.0</span></label>
+          <input type="range" id="inp-sens" class="setting-slider" min="0.5" max="5.0" step="0.1" value="2.0">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">FIELD OF VIEW — <span id="lbl-fov">75</span>°</label>
+          <input type="range" id="inp-fov" class="setting-slider" min="60" max="110" step="5" value="75">
+        </div>
+      </div>
+      <button class="confirm-btn" id="btn-save-settings">SAVE SETTINGS →</button>
+    </div>
+
+    <!-- MULTIPLAYER SCREEN -->
+    <div id="screen-multiplayer" class="screen">
+      <div class="screen-header">
+        <button class="back-btn" id="btn-back-multiplayer">← BACK</button>
+        <h2>MULTIPLAYER</h2>
+        <div class="header-rule"></div>
+      </div>
+      <div class="mp-split">
+        <div class="mp-panel">
+          <h3>HOST ROOM</h3>
+          <p>Generate a code and share it with friends.</p>
+          <button class="menu-btn" id="btn-host">CREATE ROOM</button>
+        </div>
+        <div class="mp-or">OR</div>
+        <div class="mp-panel">
+          <h3>JOIN ROOM</h3>
+          <p>Enter a 4-letter room code.</p>
+          <input type="text" id="inp-room-code" class="room-code-input" maxlength="4" placeholder="ABCD">
+          <button class="menu-btn" id="btn-join">JOIN ROOM</button>
+        </div>
+      </div>
+      <p id="mp-error" class="mp-error"></p>
+    </div>
+
+    <!-- LOBBY SCREEN -->
+    <div id="screen-lobby" class="screen">
+      <div class="screen-header">
+        <button class="back-btn" id="btn-back-lobby">← LEAVE</button>
+        <h2>ROOM: <span id="lbl-room-code" class="room-code-display">----</span></h2>
+        <div class="header-rule"></div>
+      </div>
+      <p class="lobby-hint">Share this code with friends. Up to 4 players.</p>
+      <div id="lobby-player-list" class="lobby-player-list"></div>
+      <div class="lobby-actions">
+        <button class="confirm-btn" id="btn-start-game" style="display:none">START GAME →</button>
+        <p id="lbl-lobby-status" class="lobby-status">Waiting for host to start…</p>
+      </div>
+    </div>
+
+  </div><!-- /menu-overlay -->
+
+  <!-- ═══════════════════════════════════════ GAME CANVAS ═══ -->
+  <canvas id="game-canvas"></canvas>
+
+  <!-- ═══════════════════════════════════════ HUD ═══════════ -->
+  <div id="hud" class="hidden">
+
+    <!-- Crosshair -->
+    <div id="crosshair">
+      <div class="ch-t"></div>
+      <div class="ch-r"></div>
+      <div class="ch-b"></div>
+      <div class="ch-l"></div>
+    </div>
+
+    <!-- Hit marker -->
+    <div id="hit-marker" class="hidden"></div>
+
+    <!-- Bottom-left: health -->
+    <div id="hud-health">
+      <span id="hud-health-icon">♥</span>
+      <div id="health-bar-wrap">
+        <div id="health-bar"></div>
+      </div>
+      <span id="hud-health-val">100</span>
+    </div>
+
+    <!-- Bottom-right: ammo + weapon -->
+    <div id="hud-ammo">
+      <span id="hud-weapon-name">ASSAULT RIFLE</span>
+      <div class="ammo-nums">
+        <span id="hud-ammo-mag">30</span>
+        <span class="ammo-div">|</span>
+        <span id="hud-ammo-reserve">120</span>
+      </div>
+    </div>
+
+    <!-- Top-center: score -->
+    <div id="hud-score">
+      <span id="hud-kills">K 0</span>
+      <span class="score-sep">·</span>
+      <span id="hud-deaths">D 0</span>
+      <span class="score-sep" id="hud-room-tag"></span>
+    </div>
+
+    <!-- Top-right: kill feed -->
+    <div id="kill-feed"></div>
+
+    <!-- Reload indicator -->
+    <div id="reload-bar" class="hidden">
+      <span>RELOADING</span>
+      <div id="reload-track"><div id="reload-fill-bar"></div></div>
+    </div>
+
+    <!-- Minimap -->
+    <canvas id="minimap"></canvas>
+
+  </div>
+
+  <!-- ═══════════════════════════════════════ OVERLAYS ══════ -->
+
+  <!-- Pointer-lock / pause -->
+  <div id="pointer-lock-overlay" class="hidden">
+    <div class="plo-box">
+      <p class="plo-title">CLICK TO PLAY</p>
+      <div class="plo-controls">
+        <span>Z Q S D</span> Move &nbsp;|&nbsp;
+        <span>Mouse</span> Aim &nbsp;|&nbsp;
+        <span>LMB</span> Shoot &nbsp;|&nbsp;
+        <span>RMB</span> Scope &nbsp;|&nbsp;
+        <span>R</span> Reload &nbsp;|&nbsp;
+        <span>Space</span> Jump &nbsp;|&nbsp;
+        <span>Shift</span> Sprint
+      </div>
+      <button class="confirm-btn" id="btn-exit-to-menu">EXIT TO MENU</button>
+    </div>
+  </div>
+
+  <!-- Death screen -->
+  <div id="death-screen" class="hidden">
+    <div class="death-box">
+      <h2 class="death-title">YOU DIED</h2>
+      <p class="death-killer">Killed by <span id="lbl-killer">Enemy</span></p>
+      <p class="death-respawn">Respawning in <span id="lbl-respawn-count">5</span>s</p>
+    </div>
+  </div>
+
+  <!-- Damage vignette -->
+  <div id="damage-vignette"></div>
+
+  <!-- Scope overlay (sniper ADS) -->
+  <div id="scope-overlay" class="hidden">
+    <div class="scope-mask scope-mask-t"></div>
+    <div class="scope-mask scope-mask-b"></div>
+    <div class="scope-mask scope-mask-l"></div>
+    <div class="scope-mask scope-mask-r"></div>
+    <div class="scope-circle">
+      <div class="scope-h"></div>
+      <div class="scope-v"></div>
+      <div class="scope-mil"></div>
+    </div>
+  </div>
+
+  <!-- Loading splash -->
+  <div id="loading-screen" class="hidden">
+    <p>GENERATING MAP…</p>
+    <div class="loading-bar"><div id="loading-fill"></div></div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
