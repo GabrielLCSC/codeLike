@@ -95,6 +95,13 @@ export class Game {
     this.raycaster = new THREE.Raycaster();
     this.raycaster.far = 80;
 
+    // ── Hit shake ─────────────────────────────────────────
+    this._hitShake = 0;   // 0–1, decays each frame
+
+    // ── Bullet impact particles ────────────────────────────
+    /** @type {{mesh:THREE.Mesh, vel:THREE.Vector3, life:number}[]} */
+    this._impactParticles = [];
+
     // ── Bound event handlers (for cleanup) ────────────────
     this._onKeyDown  = this._handleKeyDown.bind(this);
     this._onKeyUp    = this._handleKeyUp.bind(this);
@@ -351,6 +358,12 @@ export class Game {
       this.mp.updatePosition(pos.x, pos.y, pos.z, Math.atan2(dir.x, dir.z));
     }
 
+    // ── Hit shake ──────────────────────────────────────
+    this._updateHitShake(delta);
+
+    // ── Bullet impact particles ─────────────────────────
+    this._updateImpacts(delta);
+
     // ── HUD ────────────────────────────────────────────
     this._updateMinimap();
 
@@ -453,7 +466,8 @@ export class Game {
   }
 
   _doShot() {
-    const spread = this.isADS ? this.wDef.spread * 0.35 : this.wDef.spread;
+    const baseSpread = this.isADS ? this.wDef.spread * 0.35 : this.wDef.spread;
+    const spread = baseSpread + this._hitShake * 0.10; // being shot widens spread
     const sx = (Math.random() - 0.5) * spread * 2;
     const sy = (Math.random() - 0.5) * spread * 2;
 
@@ -477,7 +491,7 @@ export class Game {
           if (this.mp) this.mp.updateKills(this.kills, this.deaths);
         }
       }
-      return;
+      return; // hit an enemy → no wall impact
     }
 
     // ── Check remote players (multiplayer) ────────────
@@ -495,7 +509,16 @@ export class Game {
             break;
           }
         }
+        return; // hit a player → no wall impact
       }
+    }
+
+    // ── Impact on any static surface (wall / floor / ceiling) ──
+    const staticHits = this.raycaster.intersectObjects(this.map.staticMeshes, false);
+    if (staticHits.length > 0) {
+      const sh     = staticHits[0];
+      const normal = sh.face.normal.clone().transformDirection(sh.object.matrixWorld);
+      this._spawnImpact(sh.point, normal);
     }
   }
 
@@ -533,6 +556,9 @@ export class Game {
     if (!this.alive) return;
     this.health      = Math.max(0, this.health - amount);
     this.lastDamageMs = performance.now();
+
+    // Hit shake — heavier hits shake harder
+    this._hitShake = Math.min(1.0, this._hitShake + amount / 25);
 
     // Flash vignette
     const vign = document.getElementById('damage-vignette');
@@ -848,6 +874,79 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════
+  //  HIT SHAKE
+  // ═══════════════════════════════════════════════════════
+  _updateHitShake(delta) {
+    if (this._hitShake <= 0.005) { this._hitShake = 0; return; }
+    this._hitShake = Math.max(0, this._hitShake - delta * 3.5);
+    const s = this._hitShake;
+
+    // Random camera jitter — persists until next mousemove from PointerLockControls
+    const jitter = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      (Math.random() - 0.5) * s * 0.10,
+      (Math.random() - 0.5) * s * 0.05,
+      0, 'YXZ'
+    ));
+    this.camera.quaternion.multiply(jitter);
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  BULLET IMPACT PARTICLES
+  // ═══════════════════════════════════════════════════════
+  _spawnImpact(point, normal) {
+    // ── Sparks (bright, fast, short-lived) ─────────────
+    const sparkCount = 6 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < sparkCount; i++) {
+      const isSpark = i < sparkCount * 0.5;
+      const size    = isSpark ? 0.018 + Math.random() * 0.022 : 0.025 + Math.random() * 0.035;
+      const geo     = new THREE.SphereGeometry(size, 4, 4);
+      const mat     = new THREE.MeshBasicMaterial({
+        color:       isSpark ? 0xffcc44 : 0x888877,
+        transparent: true,
+        opacity:     1,
+        depthWrite:  false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(point).addScaledVector(normal, 0.04);
+      this.scene.add(mesh);
+
+      // Velocity: spray around wall normal
+      const spread = new THREE.Vector3(
+        (Math.random() - 0.5) * 2.5,
+        Math.random() * 2.0 + 0.5,
+        (Math.random() - 0.5) * 2.5
+      );
+      const vel = normal.clone().multiplyScalar(1.5 + Math.random() * 2).add(spread);
+      const maxLife = isSpark ? 0.35 + Math.random() * 0.25 : 0.5 + Math.random() * 0.3;
+
+      this._impactParticles.push({ mesh, vel, life: maxLife, maxLife });
+    }
+
+    // ── Brief muzzle-style flash at impact point ────────
+    const flash = new THREE.PointLight(0xffaa33, 6, 1.8);
+    flash.position.copy(point).addScaledVector(normal, 0.06);
+    this.scene.add(flash);
+    setTimeout(() => this.scene.remove(flash), 70);
+  }
+
+  _updateImpacts(delta) {
+    for (let i = this._impactParticles.length - 1; i >= 0; i--) {
+      const p = this._impactParticles[i];
+      p.life -= delta;
+      p.vel.y -= 9 * delta;          // gravity
+      p.mesh.position.addScaledVector(p.vel, delta * 0.6);
+      p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
+
+      if (p.life <= 0) {
+        this.scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.dispose();
+        this._impactParticles.splice(i, 1);
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
   //  GUN MODEL BUILDER
   // ═══════════════════════════════════════════════════════
   _buildGunModel(key) {
@@ -899,6 +998,10 @@ export class Game {
     const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.65, 0.30), bMat);
     torso.position.y = 0.90;
     g.add(torso);
+
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), hMat);
+    neck.position.y = 1.30;
+    g.add(neck);
 
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.32, 0.30), hMat);
     head.position.y = 1.52;

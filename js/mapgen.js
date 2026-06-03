@@ -13,15 +13,17 @@ export class MapGenerator {
     this.grid   = [];
     this.rooms  = [];     // { x,z,w,h }
     this.spawnPoints = []; // { x,z } world-space centres
-    this.wallMeshes  = []; // THREE.Mesh[] — used for LOS raycasting
+    this.wallMeshes   = []; // wall boxes only — kept for any future LOS use
+    this.staticMeshes = []; // ALL static geometry (walls + floors + ceilings) — for bullet impacts
   }
 
   // ─── PUBLIC ──────────────────────────────────────────────
   generate() {
     this.grid = Array.from({ length: this.width }, () => new Uint8Array(this.height));
-    this.rooms = [];
-    this.spawnPoints = [];
-    this.wallMeshes  = [];
+    this.rooms        = [];
+    this.spawnPoints  = [];
+    this.wallMeshes   = [];
+    this.staticMeshes = [];
 
     this._placeRooms(10);
     this._connectRooms();
@@ -51,17 +53,20 @@ export class MapGenerator {
           wall.receiveShadow = true;
           scene.add(wall);
           this.wallMeshes.push(wall);
+          this.staticMeshes.push(wall);
         } else {
           // ── FLOOR ──
           const floor = new THREE.Mesh(slabGeoTemplate, floorMat);
           floor.position.set(wx, 0, wz);
           floor.receiveShadow = true;
           scene.add(floor);
+          this.staticMeshes.push(floor);
 
           // ── CEILING ──
           const ceil = new THREE.Mesh(slabGeoTemplate, ceilMat);
           ceil.position.set(wx, WALL_HEIGHT, wz);
           scene.add(ceil);
+          this.staticMeshes.push(ceil);
         }
       }
     }

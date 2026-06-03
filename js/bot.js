@@ -233,6 +233,11 @@ export class Bot {
       group.add(arm);
     }
 
+    // Neck
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), headMat);
+    neck.position.y = 1.30;
+    group.add(neck);
+
     // Head
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.32, 0.30), headMat);
     head.position.y = 1.52;
