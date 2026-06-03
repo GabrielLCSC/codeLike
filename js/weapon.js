@@ -130,7 +130,7 @@ export class WeaponSystem {
     this._recoilRotX = Math.min(this._recoilRotX + this.def.recoilRotX, this.def.recoilRotX * 3);
 
     // Camera pitch — pure-X Euler manipulation to avoid yaw bleed
-    const kick = this.def.recoilRotX * 0.055;
+    const kick = this.def.recoilRotX * 0.09;
     const re   = new THREE.Euler().setFromQuaternion(this._camera.quaternion, 'YXZ');
     re.x = Math.min(Math.PI / 2 - 0.05, re.x + kick);
     this._camera.quaternion.setFromEuler(re);
@@ -215,7 +215,7 @@ export class WeaponSystem {
 
     // Camera pitch recovery (only between bursts)
     if (!isFiring && this._sprayRecoil > 0.0005) {
-      const recover = Math.min(this._sprayRecoil, delta * 0.9);
+      const recover = Math.min(this._sprayRecoil, delta * 0.1);
       const re = new THREE.Euler().setFromQuaternion(this._camera.quaternion, 'YXZ');
       re.x = Math.max(-Math.PI / 2 + 0.05, re.x - recover);
       this._camera.quaternion.setFromEuler(re);

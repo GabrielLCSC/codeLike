@@ -102,6 +102,8 @@ export class Bot {
         this._moveToward(this.waypointTarget.x, this.waypointTarget.z, delta, this.speed * 0.55);
       }
     }
+
+    this._animate(delta);
   }
 
   /** Apply damage; returns true if this hit killed the bot. */
@@ -208,8 +210,41 @@ export class Bot {
       const pick = sp[Math.floor(Math.random() * sp.length)];
       this.mesh.position.set(pick.x, 0, pick.z);
       this.mesh.rotation.set(0, 0, 0);
+      if (this._limbs) {
+        Object.values(this._limbs).forEach(l => { l.rotation.x = 0; });
+      }
+      this._animPhase = 0;
       this.mesh.visible = true;
     }, BOT_RESPAWN_MS);
+  }
+
+  // ─── ANIMATION ───────────────────────────────────────
+  /**
+   * Drive limb rotations based on current AI state.
+   * Arms and legs swing around their local X axis (forward / back).
+   */
+  _animate(delta) {
+    const L = this._limbs;
+    if (!L) return;
+
+    if (this.state === 'attack') {
+      // Raise both arms forward as if aiming a weapon
+      L.leftArm.rotation.x  = THREE.MathUtils.lerp(L.leftArm.rotation.x,  -0.65, 0.12);
+      L.rightArm.rotation.x = THREE.MathUtils.lerp(L.rightArm.rotation.x, -0.65, 0.12);
+      L.leftLeg.rotation.x  = THREE.MathUtils.lerp(L.leftLeg.rotation.x,    0,   0.12);
+      L.rightLeg.rotation.x = THREE.MathUtils.lerp(L.rightLeg.rotation.x,   0,   0.12);
+    } else {
+      const isRunning = this.state === 'chase';
+      const freq = isRunning ? 10  : 5.5;
+      const amp  = isRunning ? 0.68 : 0.42;
+      this._animPhase += delta * freq;
+      const swing = Math.sin(this._animPhase);
+      // Arms counter-swing to legs (natural gait)
+      L.leftArm.rotation.x  =  swing * amp;
+      L.rightArm.rotation.x = -swing * amp;
+      L.leftLeg.rotation.x  = -swing * amp * 0.85;
+      L.rightLeg.rotation.x =  swing * amp * 0.85;
+    }
   }
 
   _createMesh() {
@@ -232,18 +267,26 @@ export class Bot {
     group.add(vest);
 
     // Legs
-    for (const side of [-0.13, 0.13]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bodyMat);
-      leg.position.set(side, 0.35, 0);
-      group.add(leg);
-    }
+    const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bodyMat);
+    leftLeg.position.set(-0.13, 0.35, 0);
+    group.add(leftLeg);
+
+    const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.55, 0.22), bodyMat);
+    rightLeg.position.set(0.13, 0.35, 0);
+    group.add(rightLeg);
 
     // Arms
-    for (const side of [-0.37, 0.37]) {
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bodyMat);
-      arm.position.set(side, 0.90, 0);
-      group.add(arm);
-    }
+    const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bodyMat);
+    leftArm.position.set(-0.37, 0.90, 0);
+    group.add(leftArm);
+
+    const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.50, 0.16), bodyMat);
+    rightArm.position.set(0.37, 0.90, 0);
+    group.add(rightArm);
+
+    // Store limb refs for per-frame animation
+    this._limbs = { leftArm, rightArm, leftLeg, rightLeg };
+    this._animPhase = 0;
 
     // Neck
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.13, 0.16, 8), headMat);

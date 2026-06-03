@@ -242,32 +242,39 @@ export class Game {
       if (this.remotePlayers.has(uid)) {
         const rp = this.remotePlayers.get(uid);
 
-        if (rp.data.alive && !data.alive) {
+        // Snapshot previous alive state THEN update immediately.
+        // This ensures any re-delivery of the same Firebase event (caused by
+        // concurrent writes, e.g. updateKills) sees rp.data.alive = false and
+        // skips the kill block — preventing the kill from counting multiple times.
+        const wasAlive = rp.data.alive;
+        rp.data       = data;
+        rp.targetPos.set(data.x, 0, data.z);
+        rp.targetRotY = data.rotY ?? 0;
+        rp.mesh.visible = !!data.alive;
+
+        if (wasAlive && !data.alive) {
           // Drop a corpse at last known position
           const corpse = this._makeCorpse(rp.mesh.position, rp.mesh.rotation.y, 0x0055cc);
           this.scene.add(corpse);
           this._fadeAndRemove(corpse, 5, 8);
 
           if (this._recentlyShot.has(uid)) {
+            this._recentlyShot.delete(uid); // clear before _onKill to avoid re-entry
             this._onKill(data.name ?? 'Player');
-            this._recentlyShot.delete(uid);
-            this.mp?.updateKills(this.kills, this.deaths);
           }
         }
-
-        rp.data       = data;
-        rp.targetPos.set(data.x, 0, data.z);
-        rp.targetRotY = data.rotY ?? 0;
-        rp.mesh.visible = !!data.alive;
       } else {
-        const mesh = this._buildRemotePlayerMesh(data.name ?? 'Player');
+        const { mesh, limbs } = this._buildRemotePlayerMesh(data.name ?? 'Player');
         mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
           mesh,
+          limbs,
           data,
           targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
+          animPhase:  0,
+          prevPos:    new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
         });
       }
     };
@@ -317,7 +324,7 @@ export class Game {
     this.weapon.update(delta, this.isMoving, this.mouseDown);
 
     this._updateBots(delta, nowMs);
-    this._updateRemotePlayers();
+    this._updateRemotePlayers(delta);
     this.particles.update(delta);
 
     // Firebase position sync (rate-limited)
@@ -441,11 +448,15 @@ export class Game {
       this.camera,
     );
 
+    // Cast walls first — anything behind a wall is unreachable
+    const wallHits = this.raycaster.intersectObjects(this.map.staticMeshes, false);
+    const wallDist = wallHits.length > 0 ? wallHits[0].distance : Infinity;
+
     // ── Bots ────────────────────────────────────────────
     const botHits = this.raycaster.intersectObjects(
       this.bots.filter(b => b.alive).map(b => b.mesh), true,
     );
-    if (botHits.length > 0) {
+    if (botHits.length > 0 && botHits[0].distance < wallDist) {
       const hit = botHits[0];
       const bot = this.bots.find(b => b.mesh === hit.object || b.mesh === hit.object.parent);
       if (!bot?.alive) return;
@@ -462,7 +473,7 @@ export class Game {
       } else {
         this.hud.showScorePopup(isHead ? '+75' : '+50');
       }
-      return; // bot absorbs the bullet
+      return;
     }
 
     // ── Remote players ───────────────────────────────────
@@ -470,7 +481,7 @@ export class Game {
       const rHits = this.raycaster.intersectObjects(
         [...this.remotePlayers.values()].map(r => r.mesh), true,
       );
-      if (rHits.length > 0) {
+      if (rHits.length > 0 && rHits[0].distance < wallDist) {
         const hit = rHits[0];
         for (const [uid, rp] of this.remotePlayers) {
           if (rp.mesh === hit.object || rp.mesh === hit.object.parent) {
@@ -485,12 +496,11 @@ export class Game {
             break;
           }
         }
-        return; // player absorbs the bullet
+        return;
       }
     }
 
     // ── Static surfaces ──────────────────────────────────
-    const wallHits = this.raycaster.intersectObjects(this.map.staticMeshes, false);
     if (wallHits.length > 0) {
       const sh     = wallHits[0];
       const normal = sh.face.normal.clone().transformDirection(sh.object.matrixWorld);
@@ -596,16 +606,62 @@ export class Game {
     });
   }
 
-  _updateRemotePlayers() {
+  _updateRemotePlayers(delta) {
     this.remotePlayers.forEach(rp => {
       if (!rp.mesh.visible) return;
       rp.mesh.position.lerp(rp.targetPos, 0.25);
       rp.mesh.rotation.y = THREE.MathUtils.lerp(rp.mesh.rotation.y, rp.targetRotY, 0.25);
+
       // Billboard name labels (depthTest=false) toward local camera
       rp.mesh.traverse(c => {
         if (c.isMesh && c.material?.depthTest === false) c.lookAt(this.camera.position);
       });
+
+      // Limb animation
+      if (rp.limbs && rp.prevPos) {
+        this._animateRemotePlayer(rp, delta);
+      }
     });
+  }
+
+  /**
+   * Drive limb swing for a remote player based on how much their mesh
+   * moved this frame (lerp-smoothed) and whether they are airborne.
+   */
+  _animateRemotePlayer(rp, delta) {
+    const L = rp.limbs;
+    const moved = rp.prevPos.distanceTo(rp.mesh.position);
+    rp.prevPos.copy(rp.mesh.position);
+
+    // Detect airborne: y position is synced from Firebase
+    const groundY = 0;
+    const isAirborne = (rp.data.y ?? groundY) > groundY + 0.35;
+
+    if (isAirborne) {
+      // Jump pose: arms spread forward, legs pulled back slightly
+      L.leftArm.rotation.x  = THREE.MathUtils.lerp(L.leftArm.rotation.x,   0.55, 0.18);
+      L.rightArm.rotation.x = THREE.MathUtils.lerp(L.rightArm.rotation.x,  0.55, 0.18);
+      L.leftLeg.rotation.x  = THREE.MathUtils.lerp(L.leftLeg.rotation.x,  -0.30, 0.18);
+      L.rightLeg.rotation.x = THREE.MathUtils.lerp(L.rightLeg.rotation.x, -0.30, 0.18);
+    } else if (moved > 0.005) {
+      // Walking / running — threshold tuned to lerp-damped displacement
+      const isRunning = moved > 0.022;
+      const freq = isRunning ? 10   : 5.5;
+      const amp  = isRunning ? 0.68 : 0.42;
+      rp.animPhase += delta * freq;
+      const swing = Math.sin(rp.animPhase);
+      L.leftArm.rotation.x  =  swing * amp;
+      L.rightArm.rotation.x = -swing * amp;
+      L.leftLeg.rotation.x  = -swing * amp * 0.85;
+      L.rightLeg.rotation.x =  swing * amp * 0.85;
+    } else {
+      // Idle: smoothly return all limbs to neutral
+      const t = Math.min(1, delta * 6);
+      L.leftArm.rotation.x  = THREE.MathUtils.lerp(L.leftArm.rotation.x,  0, t);
+      L.rightArm.rotation.x = THREE.MathUtils.lerp(L.rightArm.rotation.x, 0, t);
+      L.leftLeg.rotation.x  = THREE.MathUtils.lerp(L.leftLeg.rotation.x,  0, t);
+      L.rightLeg.rotation.x = THREE.MathUtils.lerp(L.rightLeg.rotation.x, 0, t);
+    }
   }
 
   // ═══════════════════════════════════════════════════════
@@ -720,10 +776,10 @@ export class Game {
     };
 
     box(bMat, [0.55, 0.65, 0.30], [0,     0.90, 0]);  // torso
-    box(bMat, [0.16, 0.50, 0.16], [-0.37, 0.90, 0]);  // left arm
-    box(bMat, [0.16, 0.50, 0.16], [ 0.37, 0.90, 0]);  // right arm
-    box(bMat, [0.20, 0.55, 0.22], [-0.13, 0.35, 0]);  // left leg
-    box(bMat, [0.20, 0.55, 0.22], [ 0.13, 0.35, 0]);  // right leg
+    const leftArm  = box(bMat, [0.16, 0.50, 0.16], [-0.37, 0.90, 0]);
+    const rightArm = box(bMat, [0.16, 0.50, 0.16], [ 0.37, 0.90, 0]);
+    const leftLeg  = box(bMat, [0.20, 0.55, 0.22], [-0.13, 0.35, 0]);
+    const rightLeg = box(bMat, [0.20, 0.55, 0.22], [ 0.13, 0.35, 0]);
     box(hMat, [0.34, 0.32, 0.30], [0,     1.52, 0]);  // head
     box(gMat, [0.06, 0.06, 0.38], [0.37,  0.72, 0.24]); // gun (positive Z = forward)
 
@@ -752,7 +808,7 @@ export class Game {
     label.position.y = 2.28;
     g.add(label);
 
-    return g;
+    return { mesh: g, limbs: { leftArm, rightArm, leftLeg, rightLeg } };
   }
 
   /** Flat body mesh. @param {THREE.Vector3} pos @param {number} rotY @param {number} color */
