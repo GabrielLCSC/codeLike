@@ -11,14 +11,18 @@ import {
   PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
-  HEADSHOT_MULT, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL,
+  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL, BOT_SYNC_INTERVAL,
+  GRENADE_DAMAGE, GRENADE_RADIUS, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
+  MINIMAP_PING_INTERVAL,
 } from './config.js';
+import { MapScanner } from './map-scanner.js';
 import { MapGenerator }  from './mapgen.js';
-import { Bot }           from './bot.js';
+import { Bot, SyncedBot } from './bots/index.js';
 import { sound }         from './sound.js';
 import { HUD }           from './hud.js';
 import { WeaponSystem }  from './weapon.js';
 import { ParticleSystem } from './particles.js';
+import { GrenadeSystem }  from './grenade.js';
 import {
   buildCharacterMesh,
   updateCharacterAnimation,
@@ -55,7 +59,7 @@ export class Game {
     // ── Player state ──────────────────────────────────────
     this.running = false;
     this.alive   = true;
-    this.health  = 100;
+    this.health  = MAX_HEALTH;
     this.kills   = 0;
     this.deaths  = 0;
 
@@ -70,16 +74,30 @@ export class Game {
     this._hitShake     = 0;   // 0–1, camera jitter when hit
     this._killStreak   = 0;   // resets on death; drives kill-confirm pitch
     /** @type {Set<string>} UIDs we've shot recently (multiplayer kill confirm) */
-    this._recentlyShot = new Set();
+    /** @type {Map<string, boolean>} uid → killing blow was headshot */
+    this._recentlyShot = new Map();
+    this._nearAmmoChest = false;
+    this._ammoChestReadyAt = 0;
 
     // ── Timing ────────────────────────────────────────────
     this.lastFrameMs      = performance.now();
     this.lastDamageMs     = -9999;
     this.lastSyncMs       = -9999;
+    this.lastRotSyncMs    = -9999;
+    this._lastSyncGx      = -999;
+    this._lastSyncGz      = -999;
+    this._tabHeld         = false;
+    /** @type {Map<string, { uid: string, t: number }[]>} */
+    this._damageLog       = new Map();
+    /** @type {import('./map-scanner.js').MapScanner|null} */
+    this.mapScanner       = null;
+    this._minimapPingTimer = 0;
     this.damageFlashTimer = 0;
 
     // ── Scene objects ─────────────────────────────────────
     /** @type {Bot[]} */ this.bots = [];
+    /** @type {SyncedBot[]} */ this.syncedBots = [];
+    this.lastBotSyncMs = 0;
     /** @type {Map<string,{mesh:THREE.Group, data:object, targetPos:THREE.Vector3, targetRotY:number}>} */
     this.remotePlayers = new Map();
 
@@ -87,6 +105,7 @@ export class Game {
     /** @type {HUD}            */ this.hud       = null;
     /** @type {WeaponSystem}   */ this.weapon    = null;
     /** @type {ParticleSystem} */ this.particles = null;
+    /** @type {GrenadeSystem}   */ this.grenades  = null;
 
     // ── Input ─────────────────────────────────────────────
     this.keys      = new Set();
@@ -116,17 +135,19 @@ export class Game {
   start() {
     this._claimedSpawns.clear();
     this.bots = [];
+    this.syncedBots = [];
     this.remotePlayers.clear();
 
     this._initRenderer();
     this._initScene();
     this._initMap();
+    this.mapScanner = new MapScanner(this.map.width, this.map.height, MAP_SCAN_RADIUS);
     this._initPlayerSpawnSlot();
     this._initPlayer();
     this._initSystems();
     this._bindInput();
 
-    if ((this.opts.botCount ?? 0) > 0) this._spawnBots(this.opts.botCount);
+    if ((this.opts.botCount ?? 0) > 0) this._initBots(this.opts.botCount);
     if (this.mp)              this._setupMultiplayer();
 
     this.hud.show();
@@ -135,7 +156,9 @@ export class Game {
     this._loop();
   }
 
-  stop() {
+  /** @param {{ leaveRoom?: boolean }} [opts] */
+  stop(opts = {}) {
+    const { leaveRoom = true } = opts;
     sound.stopAmbiance();
     sound.stopTacticalSprintLoop();
     this.running = false;
@@ -143,13 +166,15 @@ export class Game {
     this._unbindInput();
     this.bots.forEach(b => this.scene?.remove(b.mesh));
     this.bots = [];
+    this.syncedBots.forEach(b => b.dispose());
+    this.syncedBots = [];
     this.remotePlayers.forEach(({ mesh }) => this.scene?.remove(mesh));
     this.remotePlayers.clear();
     this._claimedSpawns.clear();
     this.particles?.dispose();
     this.renderer?.dispose();
     this.scene = null;
-    this.mp?.leave();
+    if (leaveRoom) void this.mp?.leave();
     this.hud?.hide();
 
     document.getElementById('pointer-lock-overlay').classList.add('hidden');
@@ -162,6 +187,7 @@ export class Game {
   changeWeapon(key) {
     this.weapon.equip(key);     // equip() calls setADS(false) internally
     this._applyADSState(false);
+    this.mp?.updateWeapon(key);
   }
 
   /** Called from in-game pause panel. */
@@ -220,7 +246,13 @@ export class Game {
       sound.init().then(() => sound.startAmbiance('city'));
     });
     this.controls.addEventListener('unlock', () => {
-      if (this.alive && this.running) plo.classList.remove('hidden');
+      if (!this.alive || !this.running) return;
+      // Tab releases pointer lock in some browsers — don't open pause/settings for that
+      if (this._tabHeld) {
+        plo.classList.add('hidden');
+        return;
+      }
+      plo.classList.remove('hidden');
     });
 
     setTimeout(() => this.controls.lock(), 200);
@@ -250,47 +282,130 @@ export class Game {
     this.weapon.onMuzzleEffects = (pos, dir) => {
       this.particles.spawnMuzzleSmoke(pos, dir);
     };
+
+    this.grenades = new GrenadeSystem(this.camera, this.scene, this.weapon, {
+      onExplosionDamage: (center, source, authoritative) =>
+        this._applyGrenadeDamage(center, source, authoritative),
+      broadcastThrow: (data) => {
+        this.mp?.sendWorldEvent({ type: 'grenade_throw', ...data });
+      },
+      broadcastExplode: (center) => {
+        this.mp?.sendWorldEvent({
+          type: 'grenade_explode',
+          x: center.x, y: center.y, z: center.z,
+        });
+      },
+      getBots:      () => (this._isMpClient() ? this.syncedBots : this.bots),
+      getMap:       () => this.map,
+      getParticles: () => this.particles,
+    });
+    this.hud.setGrenades(this.grenades.count);
   }
 
   _spawnHalf() {
     return Math.ceil(this.map.spawnPoints.length / 2);
   }
 
-  /**
-   * Reserve a unique spawn index. Tries preferred first, then any free slot.
-   * @param {number|null} preferred
-   * @returns {number}
-   */
-  _claimSpawnSlot(preferred = null) {
-    const n = this.map.spawnPoints.length;
-    if (
-      preferred !== null &&
-      preferred >= 0 &&
-      preferred < n &&
-      !this._claimedSpawns.has(preferred)
-    ) {
-      this._claimedSpawns.add(preferred);
-      return preferred;
+  /** Count players/bots near a spawn index. */
+  _countOccupancyNearSpawn(slotIndex) {
+    const sp = this.map.spawnPoints[slotIndex];
+    if (!sp) return 0;
+    const r2 = SPAWN_OCCUPANCY_RADIUS * SPAWN_OCCUPANCY_RADIUS;
+    let n = 0;
+
+    const near = (x, z) => {
+      const dx = x - sp.x;
+      const dz = z - sp.z;
+      return dx * dx + dz * dz <= r2;
+    };
+
+    if (this.camera && near(this.camera.position.x, this.camera.position.z)) n++;
+
+    for (const b of this.bots) {
+      if (b.alive && near(b.mesh.position.x, b.mesh.position.z)) n++;
     }
-    for (let i = 0; i < n; i++) {
-      if (!this._claimedSpawns.has(i)) {
-        this._claimedSpawns.add(i);
-        return i;
-      }
+    for (const sb of this.syncedBots) {
+      if (sb?.alive && near(sb.mesh.position.x, sb.mesh.position.z)) n++;
     }
-    return preferred ?? 0;
+    for (const rp of this.remotePlayers.values()) {
+      if (rp.mesh.visible && near(rp.mesh.position.x, rp.mesh.position.z)) n++;
+    }
+    for (const p of this.mp?.players.values() ?? []) {
+      if (near(p.x ?? 0, p.z ?? 0)) n++;
+    }
+    return n;
   }
 
-  /** Unique spawn slot for the local player (spawn zone A). */
+  /**
+   * Pick the least crowded spawn slot in [minSlot, maxSlot).
+   * @param {number} minSlot
+   * @param {number} maxSlot
+   */
+  _claimLeastCrowdedSpawn(minSlot, maxSlot) {
+    let best = minSlot;
+    let bestCount = Infinity;
+    for (let i = minSlot; i < maxSlot; i++) {
+      if (this._claimedSpawns.has(i)) continue;
+      const c = this._countOccupancyNearSpawn(i);
+      if (c < bestCount) {
+        bestCount = c;
+        best = i;
+      }
+    }
+    if (bestCount === Infinity) {
+      for (let i = minSlot; i < maxSlot; i++) {
+        if (!this._claimedSpawns.has(i)) {
+          this._claimedSpawns.add(i);
+          return i;
+        }
+      }
+      return minSlot;
+    }
+    this._claimedSpawns.add(best);
+    return best;
+  }
+
   _initPlayerSpawnSlot() {
     const half = this._spawnHalf();
-    let preferred = 0;
-    if (this.mp) {
-      const humans = [...this.mp.players.keys()].sort();
-      const idx    = humans.indexOf(this.mp.uid);
-      preferred    = idx >= 0 ? idx % half : 0;
+    this._playerSpawnSlot = this._claimLeastCrowdedSpawn(0, half);
+  }
+
+  _recordDamage(targetKey, shooterUid = null) {
+    const uid = shooterUid ?? this.mp?.uid;
+    if (!uid) return;
+    const list = this._damageLog.get(targetKey) ?? [];
+    list.push({ uid, t: performance.now() });
+    this._damageLog.set(targetKey, list);
+  }
+
+  /** Periodic minimap pings for bots / remote players (not continuous). */
+  _updateMinimapPings(delta) {
+    this._minimapPingTimer -= delta;
+    if (this._minimapPingTimer > 0) return;
+    this._minimapPingTimer = MINIMAP_PING_INTERVAL;
+
+    const sources = this._isMpClient() ? this.syncedBots : this.bots;
+    for (const b of sources) {
+      if (!b?.alive) continue;
+      this.hud.pushMinimapPing(b.mesh.position.x, b.mesh.position.z, '#ff4444');
     }
-    this._playerSpawnSlot = this._claimSpawnSlot(preferred);
+    for (const rp of this.remotePlayers.values()) {
+      if (!rp.mesh.visible) continue;
+      this.hud.pushMinimapPing(rp.mesh.position.x, rp.mesh.position.z, '#4488ff');
+    }
+  }
+
+  _consumeAssists(targetKey) {
+    const list = this._damageLog.get(targetKey) ?? [];
+    const now  = performance.now();
+    const uids = new Set();
+    for (const e of list) {
+      if (now - e.t > ASSIST_WINDOW_MS) continue;
+      if (e.uid === this.mp?.uid) continue;
+      uids.add(e.uid);
+    }
+    this._damageLog.delete(targetKey);
+    return [...uids];
   }
 
   _getSpawnPos(slotIndex) {
@@ -316,16 +431,228 @@ export class Game {
     this.camera.position.set(x, PLAYER_HEIGHT, z);
   }
 
-  _spawnBots(count) {
+  _isMultiplayer() { return this.mode === 'multi' && !!this.mp; }
+  _isMpHost()      { return this._isMultiplayer() && this.mp.isHost; }
+  _isMpClient()    { return this._isMultiplayer() && !this.mp.isHost; }
+
+  _canShowLeaderboard() {
+    if (this.mp) return true;
+    return this.bots.length > 0;
+  }
+
+  /** @param {string} name — e.g. `Bot-2` */
+  _botFromKillName(name) {
+    if (!name?.startsWith('Bot-')) return null;
+    const idx = parseInt(name.replace('Bot-', ''), 10) - 1;
+    if (Number.isNaN(idx) || idx < 0) return null;
+    return this.bots[idx] ?? null;
+  }
+
+  _onBotEliminated(bot, isHeadshot = false) {
+    if (!bot) return;
+    bot.deaths++;
+    this._onKill(`Bot-${bot.index + 1}`, isHeadshot);
+  }
+
+  _getLeaderboardRows() {
+    const rows = this.mp
+      ? this.mp.getLeaderboardRows()
+      : [{
+          name:    this.username,
+          kills:   this.kills,
+          deaths:  this.deaths,
+          assists: 0,
+          ratio:   this.kills / Math.max(1, this.deaths),
+          isSelf:  true,
+        }];
+
+    const botList = this._isMpClient() ? this.syncedBots : this.bots;
+    for (const bot of botList) {
+      if (!bot) continue;
+      const idx = bot.index ?? 0;
+      const k = bot.kills ?? 0;
+      const d = bot.deaths ?? 0;
+      rows.push({
+        name:    `Bot-${idx + 1}`,
+        kills:   k,
+        deaths:  d,
+        assists: bot.assists ?? 0,
+        ratio:   k / Math.max(1, d),
+        isSelf:  false,
+        isBot:   true,
+      });
+    }
+
+    return rows.sort((a, b) => b.kills - a.kills || b.ratio - a.ratio);
+  }
+
+  _initBots(count) {
+    if (this._isMpClient()) {
+      for (let i = 0; i < count; i++) {
+        const sb = new SyncedBot(this.scene, this.map, i);
+        sb.mesh.visible = false;
+        this.syncedBots[i] = sb;
+      }
+      return;
+    }
+
     const cfg  = BOT_LEVELS[this.opts.botLevel ?? 'corporal'] ?? BOT_LEVELS.corporal;
     const half = this._spawnHalf();
     for (let i = 0; i < count; i++) {
-      const preferred = half + (i % half);
-      const slot      = this._claimSpawnSlot(preferred);
+      const slot = this._claimLeastCrowdedSpawn(half, half + count);
       const sp        = this._getSpawnPos(slot);
       const onSound   = (key, pos, opts) => this._playWorldSound(key, pos, opts);
-      this.bots.push(new Bot(this.scene, sp, this.map, i, cfg, onSound, slot));
+      const onShoot   = () => {
+        if (!this.mp) return;
+        const b = this.bots[i];
+        if (!b?.alive) return;
+        this.mp.sendWorldEvent({
+          type:     'bot_shot',
+          botIndex: i,
+          x:        b.mesh.position.x,
+          z:        b.mesh.position.z,
+        });
+      };
+      this.bots.push(new Bot(this.scene, sp, this.map, i, cfg, onSound, slot, onShoot));
     }
+  }
+
+  _applyBotsSnapshot(data) {
+    for (const [key, state] of Object.entries(data)) {
+      const idx = Number(key);
+      if (Number.isNaN(idx)) continue;
+      if (!this.syncedBots[idx]) {
+        this.syncedBots[idx] = new SyncedBot(this.scene, this.map, idx);
+      }
+      this.syncedBots[idx].applyState(state);
+    }
+  }
+
+  _syncBotsToFirebase(nowMs) {
+    if (!this._isMpHost() || nowMs - this.lastBotSyncMs < BOT_SYNC_INTERVAL) return;
+    this.lastBotSyncMs = nowMs;
+    const payload = {};
+    this.bots.forEach((bot, i) => {
+      payload[String(i)] = bot.getSyncState();
+    });
+    this.mp.syncBots(payload);
+  }
+
+  _applyGrenadeDamage(center, sourceName, authoritative) {
+    const map = this.map;
+    const applyToSelf = () => {
+      const px = this.camera.position.x;
+      const py = this.camera.position.y;
+      const pz = this.camera.position.z;
+      const dist = Math.hypot(px - center.x, py - center.y, pz - center.z);
+      if (dist >= GRENADE_RADIUS) return;
+      if (!map.hasLOS(center.x, center.z, px, pz)) return;
+      const t = 1 - dist / GRENADE_RADIUS;
+      const dmg = GRENADE_DAMAGE * t * t;
+      if (dmg > 0) this.takeDamage(dmg, sourceName);
+    };
+
+    if (authoritative) {
+      applyToSelf();
+      if (this._isMpHost() || !this._isMultiplayer()) {
+        for (const bot of this.bots) {
+          if (!bot.alive) continue;
+          const bx = bot.mesh.position.x;
+          const bz = bot.mesh.position.z;
+          const dist = Math.hypot(bx - center.x, 1 - center.y, bz - center.z);
+          if (dist >= GRENADE_RADIUS || !map.hasLOS(center.x, center.z, bx, bz)) continue;
+          const t = 1 - dist / GRENADE_RADIUS;
+          const dmg = GRENADE_DAMAGE * t * t;
+          if (dmg > 0) {
+            const killed = bot.takeDamage(dmg);
+            if (killed) this._onBotEliminated(bot, false);
+          }
+        }
+      }
+      if (this._isMultiplayer()) {
+        for (const [uid, rp] of this.remotePlayers) {
+          if (!rp.mesh.visible) continue;
+          const rx = rp.mesh.position.x;
+          const rz = rp.mesh.position.z;
+          const dist = Math.hypot(rx - center.x, rp.mesh.position.y - center.y, rz - center.z);
+          if (dist >= GRENADE_RADIUS || !map.hasLOS(center.x, center.z, rx, rz)) continue;
+          const t = 1 - dist / GRENADE_RADIUS;
+          const dmg = Math.round(GRENADE_DAMAGE * t * t);
+          if (dmg > 0) this.mp.sendHit(uid, dmg);
+        }
+      }
+    } else {
+      applyToSelf();
+    }
+  }
+
+  _handleWorldEvent(evt) {
+    if (evt.shooter === this.mp?.uid) {
+      if (evt.type === 'shot' || evt.type === 'bot_shot' || evt.type === 'grenade_throw' || evt.type === 'bot_kill') {
+        return;
+      }
+    }
+
+    switch (evt.type) {
+      case 'shot': {
+        const snd = { assault_rifle: 'ar_shoot', shotgun: 'sg_shoot', sniper: 'sn_shoot' }[evt.weapon] ?? 'ar_shoot';
+        this._playWorldSound(snd, { x: evt.x, y: evt.y ?? 1.2, z: evt.z }, { volume: 0.58, maxDist: 42 });
+        break;
+      }
+      case 'bot_shot':
+        this._playWorldSound('ar_shoot', { x: evt.x, y: 1.2, z: evt.z }, { volume: 0.65, maxDist: 38 });
+        break;
+      case 'bot_hit':
+        if (this._isMpHost()) {
+          const bot = this.bots[evt.botIndex];
+          if (bot?.alive) {
+            this._recordDamage(`bot:${evt.botIndex}`, evt.shooter);
+            const killed = bot.takeDamage(evt.damage);
+            if (killed) {
+              bot.deaths++;
+              this.mp.sendWorldEvent({
+                type:     'bot_kill',
+                botIndex: evt.botIndex,
+                shooter:  evt.shooter,
+              });
+              if (evt.shooter === this.mp.uid) {
+                this._onKill(`Bot-${bot.index + 1}`, false);
+              }
+            }
+          }
+        }
+        break;
+      case 'bot_kill':
+        if (evt.shooter === this.mp.uid) {
+          this._onKill(`Bot-${evt.botIndex + 1}`, false);
+        }
+        break;
+      case 'grenade_throw':
+        if (evt.shooter !== this.mp.uid) {
+          this.grenades.spawnRemoteThrow(evt);
+        }
+        break;
+      case 'grenade_explode':
+        if (evt.shooter !== this.mp.uid) {
+          const killer = this.mp.players.get(evt.shooter)?.name ?? 'Grenade';
+          this.grenades.handleRemoteExplode(
+            new THREE.Vector3(evt.x, evt.y ?? 0.2, evt.z),
+            killer,
+          );
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  _getBotShotTargets() {
+    if (this._isMpClient()) {
+      return this.syncedBots
+        .filter(b => b && b.alive)
+        .map(b => ({ mesh: b.mesh, ref: { type: 'synced', index: b.index } }));
+    }
+    return this.bots.filter(b => b.alive).map(b => ({ mesh: b.mesh, ref: b }));
   }
 
   /** Play a sound in world space — routes through sound.playAt() with the camera as the listener. */
@@ -350,7 +677,7 @@ export class Game {
         // skips the kill block — preventing the kill from counting multiple times.
         const wasAlive = rp.data.alive;
         rp.data       = data;
-        rp.targetPos.set(data.x, 0, data.z);
+        rp.targetPos.set(data.x, data.y ?? 0, data.z);
         rp.targetRotY = data.rotY ?? 0;
         rp.mesh.visible = !!data.alive;
 
@@ -361,22 +688,23 @@ export class Game {
           this._fadeAndRemove(corpse, 5, 8);
 
           if (this._recentlyShot.has(uid)) {
-            this._recentlyShot.delete(uid); // clear before _onKill to avoid re-entry
-            this._onKill(data.name ?? 'Player');
+            const isHead = this._recentlyShot.get(uid) ?? false;
+            this._recentlyShot.delete(uid);
+            this._onKill(data.name ?? 'Player', isHead, uid);
           }
         }
       } else {
         const { mesh, rig, healthBar } = this._buildRemotePlayerMesh(data.name ?? 'Player');
-        mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
+        mesh.position.set(data.x ?? 0, data.y ?? 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
           mesh,
           rig,
           healthBar,
           data,
-          targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
+          targetPos:  new THREE.Vector3(data.x ?? 0, data.y ?? 0, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
-          prevPos:    new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
+          prevPos:    new THREE.Vector3(data.x ?? 0, data.y ?? 0, data.z ?? 0),
         });
       }
     };
@@ -390,6 +718,12 @@ export class Game {
       const killerName = this.mp.players.get(evt.shooter)?.name ?? 'Player';
       this.takeDamage(evt.damage, killerName);
     };
+
+    this.mp.onBotsUpdate = data => {
+      if (this._isMpClient()) this._applyBotsSnapshot(data);
+    };
+
+    this.mp.onWorldEvent = evt => this._handleWorldEvent(evt);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -427,16 +761,41 @@ export class Game {
     this.weapon.update(delta, this.isMoving, this.mouseDown, sprinting);
 
     this._updateBots(delta, nowMs);
+    this._syncBotsToFirebase(nowMs);
     this._updateRemotePlayers(delta);
+    this._updateAmmoChests();
+    if (this.grenades) {
+      this.grenades.update(delta);
+      this.hud.setGrenades(this.grenades.count);
+      this.hud.showGrenadePrime(
+        this.grenades.isPrimed,
+        this.grenades.fuseLeft,
+        this.controls.isLocked,
+      );
+    }
     this.particles.update(delta);
 
-    // Firebase position sync (rate-limited)
-    if (this.mp && nowMs - this.lastSyncMs > SYNC_INTERVAL) {
-      this.lastSyncMs = nowMs;
-      const pos = this.camera.position;
-      const dir = new THREE.Vector3();
-      this.camera.getWorldDirection(dir);
-      this.mp.updatePosition(pos.x, pos.y, pos.z, Math.atan2(dir.x, dir.z));
+    if (this.mapScanner) {
+      const cellChanged = this.mapScanner.scan(
+        this.camera.position.x,
+        this.camera.position.z,
+      );
+      const rotDue = nowMs - this.lastRotSyncMs > 220;
+      if (this.mp && (cellChanged || rotDue)) {
+        this.lastSyncMs    = nowMs;
+        this.lastRotSyncMs = nowMs;
+        const pos = this.camera.position;
+        const dir = new THREE.Vector3();
+        this.camera.getWorldDirection(dir);
+        const { gx, gz } = this.mapScanner.worldToCell(pos.x, pos.z);
+        this._lastSyncGx = gx;
+        this._lastSyncGz = gz;
+        this.mp.updatePosition(pos.x, pos.y, pos.z, Math.atan2(dir.x, dir.z), gx, gz);
+      }
+    }
+
+    if (this._tabHeld && this._canShowLeaderboard()) {
+      this.hud.showLeaderboard(this._getLeaderboardRows());
     }
 
     // Damage vignette fade-out
@@ -448,19 +807,49 @@ export class Game {
     // Minimap — flatten Three.js objects to plain data
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
+    this._updateMinimapPings(delta);
     this.hud.updateMinimap(
       { grid: this.map.grid, width: this.map.width, height: this.map.height },
       { x: this.camera.position.x, z: this.camera.position.z, dirX: dir.x, dirZ: dir.z },
-      this.bots.map(b => ({ x: b.mesh.position.x, z: b.mesh.position.z, alive: b.alive })),
-      [...this.remotePlayers.values()].map(rp => ({
-        x: rp.mesh.position.x, z: rp.mesh.position.z, alive: rp.mesh.visible,
-      })),
+      nowMs,
     );
   }
 
   // ═══════════════════════════════════════════════════════
   //  MOVEMENT & PHYSICS
   // ═══════════════════════════════════════════════════════
+
+  _updateAmmoChests() {
+    const px = this.camera.position.x;
+    const pz = this.camera.position.z;
+    const chests = this.map.ammoChests ?? [];
+    let near = false;
+    for (const c of chests) {
+      const dx = px - c.x;
+      const dz = pz - c.z;
+      if (dx * dx + dz * dz <= AMMO_CHEST_RADIUS * AMMO_CHEST_RADIUS) {
+        near = true;
+        break;
+      }
+    }
+    this._nearAmmoChest = near;
+    const now     = performance.now();
+    const ready   = now >= this._ammoChestReadyAt;
+    const leftSec = ready ? 0 : Math.ceil((this._ammoChestReadyAt - now) / 1000);
+    this.hud.showAmmoChestHint(near && this.controls.isLocked, ready, leftSec);
+  }
+
+  _tryAmmoChestResupply() {
+    if (!this.alive || !this.controls.isLocked || !this._nearAmmoChest) return;
+    if (performance.now() < this._ammoChestReadyAt) return;
+    const magFull = this.weapon.ammo === this.weapon.def.magSize;
+    const resFull = this.weapon.reserve === this.weapon.def.reserve;
+    if (magFull && resFull) return;
+
+    this.weapon.refillAmmo();
+    this._ammoChestReadyAt = performance.now() + AMMO_CHEST_COOLDOWN_MS;
+    sound.play('ui_click', { volume: 0.55, pitch: 1.15 });
+  }
 
   _updateMovement(delta) {
     if (!this.controls.isLocked) return;
@@ -534,6 +923,7 @@ export class Game {
 
   _tryShoot(nowMs) {
     if (!this.alive || !this.controls.isLocked || this.weapon.reloading) return;
+    if (this.grenades?.isPrimed) return;
 
     if (this.weapon.ammo <= 0) {
       if (this.weapon.reserve > 0) this.weapon.reload();
@@ -544,6 +934,16 @@ export class Game {
 
     for (let p = 0; p < this.weapon.def.pellets; p++) this._doShot();
     this.weapon.consumeShot(nowMs);
+    if (this.mp) {
+      const pos = this.camera.position;
+      this.mp.sendWorldEvent({
+        type: 'shot',
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        weapon: this.weapon.key,
+      });
+    }
     if (this.weapon.ammo <= 0 && this.weapon.reserve > 0) this.weapon.reload();
   }
 
@@ -567,6 +967,16 @@ export class Game {
     return this._hitWorldPos.y > 1.52;
   }
 
+  /** Damage for one ray/pellet (shotgun splits shell damage across pellets). */
+  _weaponShotDamage(isHead) {
+    const d = this.weapon.def;
+    const body = d.bodyDamage ?? d.damage ?? 0;
+    const head = d.headDamage ?? body * 2;
+    let amount = isHead ? head : body;
+    if (d.pellets > 1) amount /= d.pellets;
+    return amount;
+  }
+
   _doShot() {
     const s = this.weapon.effectiveSpread;
     this.raycaster.setFromCamera(
@@ -578,30 +988,37 @@ export class Game {
     const wallHits = this.raycaster.intersectObjects(this.map.staticMeshes, false);
     const wallDist = wallHits.length > 0 ? wallHits[0].distance : Infinity;
 
-    // ── Bots ────────────────────────────────────────────
-    const botEntries = this.bots.filter(b => b.alive).map(b => ({ mesh: b.mesh, ref: b }));
-    const botHits    = this.raycaster.intersectObjects(botEntries.map(e => e.mesh), true);
-    for (const hit of botHits) {
-      if (hit.distance >= wallDist) break;
-      if (hit.object.userData?.ignoreRaycast) continue;
-      if (hit.object.material?.depthTest === false) continue;
-      const entry = this._resolveCharacterHit(hit.object, botEntries);
-      if (!entry?.ref?.alive) continue;
+    // ── Bots (host AI or client proxies) ─────────────────
+    const botEntries = this._getBotShotTargets();
+    if (botEntries.length > 0) {
+      const botHits = this.raycaster.intersectObjects(botEntries.map(e => e.mesh), true);
+      for (const hit of botHits) {
+        if (hit.distance >= wallDist) break;
+        if (hit.object.userData?.ignoreRaycast) continue;
+        if (hit.object.material?.depthTest === false) continue;
+        const entry = this._resolveCharacterHit(hit.object, botEntries);
+        if (!entry?.ref) continue;
 
-      const bot    = entry.ref;
-      const isHead = this._isHeadHit(hit.object);
-      const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
-      const killed = bot.takeDamage(dmg);
+        const isHead = this._isHeadHit(hit.object);
+        const dmg    = this._weaponShotDamage(isHead);
 
-      sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
-      this.hud.showHitMarker(isHead);
+        if (entry.ref.type === 'synced') {
+          this._recordDamage(`bot:${entry.ref.index}`);
+          this.mp?.sendBotHit(entry.ref.index, dmg);
+          sound.playHitImpact(isHead);
+          this.hud.showHitMarker(isHead);
+          return;
+        }
 
-      if (killed) {
-        this._onKill(`Bot-${bot.index + 1}`);
-      } else {
-        this.hud.showScorePopup(isHead ? '+75' : '+50');
+        const bot = entry.ref;
+        if (!bot.alive) continue;
+        this._recordDamage(`bot:${bot.index}`);
+        const killed = bot.takeDamage(dmg);
+        sound.playHitImpact(isHead);
+        this.hud.showHitMarker(isHead);
+        if (killed) this._onBotEliminated(bot, isHead);
+        return;
       }
-      return;
     }
 
     // ── Remote players ───────────────────────────────────
@@ -619,15 +1036,15 @@ export class Game {
 
         const rp     = entry.ref;
         const isHead = this._isHeadHit(hit.object);
-        const dmg    = isHead ? this.weapon.def.damage * HEADSHOT_MULT : this.weapon.def.damage;
+        const dmg    = this._weaponShotDamage(isHead);
 
         for (const [uid, candidate] of this.remotePlayers) {
           if (candidate !== rp) continue;
+          this._recordDamage(`player:${uid}`);
           this.mp.sendHit(uid, dmg);
-          sound.play(isHead ? 'headshot' : 'bullet_flesh', { volume: 1.0 });
+          sound.playHitImpact(isHead);
           this.hud.showHitMarker(isHead);
-          this.hud.showScorePopup(isHead ? '+75' : '+50');
-          this._recentlyShot.add(uid);
+          this._recentlyShot.set(uid, isHead);
           setTimeout(() => this._recentlyShot.delete(uid), 5000);
           break;
         }
@@ -664,16 +1081,26 @@ export class Game {
   }
 
   /** Shared kill-confirm path for bots and remote players. */
-  _onKill(victimName) {
+  _onKill(victimName, isHeadshot = false, victimUid = null) {
     this._killStreak++;
     this.kills++;
-    this.hud.showScorePopup('+100', true);
+    this.hud.showKillScore(isHeadshot);
     this.hud.showMedal(this._killStreak);
     sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
     sound.playKillVoice(0.38, 300);
     this.hud.setScore(this.kills, this.deaths);
     this.hud.addKillFeed(this.username, victimName);
-    this.mp?.updateKills(this.kills, this.deaths);
+
+    if (this.mp) {
+      let assistKey = null;
+      if (victimUid) assistKey = `player:${victimUid}`;
+      else if (victimName.startsWith('Bot-')) {
+        const idx = parseInt(victimName.replace('Bot-', ''), 10) - 1;
+        if (!Number.isNaN(idx)) assistKey = `bot:${idx}`;
+      }
+      if (assistKey) this.mp.grantAssists(this._consumeAssists(assistKey));
+      this.mp.updateStats(this.kills, this.deaths);
+    }
   }
 
   /** kill-confirm pitch: +0.08 per kill in streak, capped at 5. */
@@ -685,11 +1112,14 @@ export class Game {
     this.alive       = false;
     this.deaths++;
     this._killStreak = 0;
-    this.mp?.updateKills(this.kills, this.deaths);
+    const killerBot = this._botFromKillName(killerName);
+    if (killerBot) killerBot.kills++;
+    this.mp?.updateStats(this.kills, this.deaths);
 
     sound.play('die', { volume: 1.0 });
     if (killerName.startsWith('Bot-')) sound.playKillVoice(0.32, 300);
     this.controls.unlock();
+    this.grenades?.reset();
     this.weapon.setADS(false);
     this._applyADSState(false);
     this.hud.addKillFeed(killerName, this.username);
@@ -705,14 +1135,19 @@ export class Game {
   }
 
   _respawn() {
-    this.health = 100;
+    this.health = MAX_HEALTH;
     this.alive  = true;
     this.weapon.equip(this.weapon.key);   // resets ammo via equip, fires callbacks
+    this.grenades?.reset();
+    this.hud.setGrenades(this.grenades?.count ?? 0);
 
+    this._claimedSpawns.delete(this._playerSpawnSlot);
+    const half = this._spawnHalf();
+    this._playerSpawnSlot = this._claimLeastCrowdedSpawn(0, half);
     const sp = this._getSpawnPos(this._playerSpawnSlot);
     this._placePlayerAt(sp.x, sp.z);
 
-    this.hud.setHealth(100);
+    this.hud.setHealth(MAX_HEALTH);
     this.hud.setScore(this.kills, this.deaths);
     this.hud.hideDeathScreen();
     this.mp?.updateHealth(100);
@@ -724,9 +1159,9 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _updateRegen(delta, nowMs) {
-    if (!this.alive || this.health >= 100) return;
+    if (!this.alive || this.health >= MAX_HEALTH) return;
     if (nowMs - this.lastDamageMs < REGEN_DELAY) return;
-    this.health = Math.min(100, this.health + REGEN_RATE * delta);
+    this.health = Math.min(MAX_HEALTH, this.health + REGEN_RATE * delta);
     this.hud.setHealth(this.health);
     this.mp?.updateHealth(Math.round(this.health));
   }
@@ -736,6 +1171,12 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _updateBots(delta, nowMs) {
+    if (this._isMpClient()) {
+      this.syncedBots.forEach(sb => {
+        if (sb) sb.updateVisual(delta, this.camera, (key, pos, opts) => this._playWorldSound(key, pos, opts));
+      });
+      return;
+    }
     this.bots.forEach(bot => {
       bot.update(delta, nowMs, this.camera.position, (dmg, name) => this.takeDamage(dmg, name));
       bot.updateHealthBar(this.camera, this.map);
@@ -745,14 +1186,14 @@ export class Game {
   _updateRemotePlayers(delta) {
     this.remotePlayers.forEach(rp => {
       if (!rp.mesh.visible) return;
-      rp.mesh.position.lerp(rp.targetPos, 0.25);
-      rp.mesh.rotation.y = THREE.MathUtils.lerp(rp.mesh.rotation.y, rp.targetRotY, 0.25);
+      rp.mesh.position.lerp(rp.targetPos, 0.28);
+      rp.mesh.rotation.y = THREE.MathUtils.lerp(rp.mesh.rotation.y, rp.targetRotY, 0.28);
 
       // Name labels + animation
       if (rp.rig && rp.prevPos) {
         this._animateRemotePlayer(rp, delta);
       }
-      const maxHp = 100;
+      const maxHp = MAX_HEALTH;
       const hp = rp.data.health ?? maxHp;
       updateCharacterOverheadUI(rp.mesh, this.camera, this.map, {
         healthBar: rp.healthBar,
@@ -769,8 +1210,7 @@ export class Game {
     const moved = rp.prevPos.distanceTo(rp.mesh.position);
     rp.prevPos.copy(rp.mesh.position);
 
-    const groundY    = 0;
-    const isAirborne = (rp.data.y ?? groundY) > groundY + 0.35;
+    const isAirborne = (rp.data.y ?? PLAYER_HEIGHT) > PLAYER_HEIGHT + 0.12;
 
     let pose = 'idle';
     if (isAirborne) {
@@ -813,7 +1253,7 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _toggleADS() {
-    if (!this.controls.isLocked || !this.alive) return;
+    if (!this.controls.isLocked || !this.alive || this.grenades?.isPrimed) return;
     this.weapon.toggleADS();
     this._applyADSState(this.weapon.isADS);
   }
@@ -833,16 +1273,16 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _bindInput() {
-    document.addEventListener('keydown',    this._onKeyDown);
-    document.addEventListener('keyup',      this._onKeyUp);
+    document.addEventListener('keydown',    this._onKeyDown, true);
+    document.addEventListener('keyup',      this._onKeyUp, true);
     document.addEventListener('mousedown',  this._onMouseDn);
     document.addEventListener('mouseup',    this._onMouseUp);
     document.addEventListener('contextmenu', this._onCtxMenu);
   }
 
   _unbindInput() {
-    document.removeEventListener('keydown',    this._onKeyDown);
-    document.removeEventListener('keyup',      this._onKeyUp);
+    document.removeEventListener('keydown',    this._onKeyDown, true);
+    document.removeEventListener('keyup',      this._onKeyUp, true);
     document.removeEventListener('mousedown',  this._onMouseDn);
     document.removeEventListener('mouseup',    this._onMouseUp);
     document.removeEventListener('contextmenu', this._onCtxMenu);
@@ -850,13 +1290,42 @@ export class Game {
   }
 
   _handleKeyDown(e) {
+    // Tab = match leaderboard (multi and solo bot lobbies). Block default Tab behavior.
+    if (e.code === 'Tab' && this.running && this.alive && this.controls?.isLocked) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (this._canShowLeaderboard()) {
+        this._tabHeld = true;
+        this.hud.showLeaderboard(this._getLeaderboardRows());
+      }
+      return;
+    }
+
     this.keys.add(e.code);
     if (!this.controls.isLocked || !this.alive) return;
     if (e.code === 'KeyR') this.weapon.reload();
-    if (e.code === 'KeyE') this._toggleADS();
+    if (e.code === 'KeyF') this._tryAmmoChestResupply();
+    if (e.code === 'KeyE' && !e.repeat) this.grenades?.tryPrime();
   }
 
-  _handleKeyUp(e) { this.keys.delete(e.code); }
+  _handleKeyUp(e) {
+    if (e.code === 'Tab') {
+      if (this._tabHeld) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      this._tabHeld = false;
+      this.hud.hideLeaderboard();
+      document.getElementById('pointer-lock-overlay')?.classList.add('hidden');
+      if (this.running && this.alive && !this.controls?.isLocked) {
+        this.controls?.lock();
+      }
+      return;
+    }
+
+    this.keys.delete(e.code);
+    if (e.code === 'KeyE') this.grenades?.releaseThrow();
+  }
 
   _handleMouseDown(e) {
     if (!this.controls.isLocked || !this.alive) return;

@@ -22,27 +22,33 @@ export class MultiplayerManager {
     this.onPlayerRemoved = null;
     /** @type {(evt:object) => void} */
     this.onHitReceived   = null;
+    /** @type {(bots:Record<string,object>) => void} */
+    this.onBotsUpdate    = null;
+    /** @type {(evt:object) => void} */
+    this.onWorldEvent    = null;
     /** @type {() => void} */
     this.onGameStart     = null;
     /** @type {(players:object[]) => void} */
     this.onLobbyUpdate   = null;
+    /** @type {() => void} */
+    this.onRoomClosed    = null;
+
+    this._roomClosedFired = false;
   }
 
   // ─── INIT ────────────────────────────────────────────
-  init() {
+  /**
+   * @param {string} [accountUid] — Firebase Auth uid when logged in
+   */
+  init(accountUid = null) {
     if (!firebase.apps.length) {
       firebase.initializeApp(FIREBASE_CONFIG);
     }
     this.db  = firebase.database();
-    this.uid = 'p_' + Math.random().toString(36).slice(2, 11);
+    this.uid = accountUid || ('p_' + Math.random().toString(36).slice(2, 11));
   }
 
   // ─── ROOM CREATION ───────────────────────────────────
-  /**
-   * Host a new room. Returns the room code.
-   * @param {string} username
-   * @param {string} weapon
-   */
   async hostRoom(username, weapon) {
     const code = this._genCode();
     this.roomCode = code;
@@ -55,20 +61,16 @@ export class MultiplayerManager {
       players: {
         [this.uid]: this._playerPayload(username, weapon, true),
       },
+      world: { bots: {} },
     };
 
     await this.db.ref(`warfront_rooms/${code}`).set(roomData);
     this.roomRef = this.db.ref(`warfront_rooms/${code}`);
+    await this.roomRef.onDisconnect().remove();
     this._listen();
     return code;
   }
 
-  /**
-   * Join an existing room.
-   * @param {string} code
-   * @param {string} username
-   * @param {string} weapon
-   */
   async joinRoom(code, username, weapon) {
     const snap = await this.db.ref(`warfront_rooms/${code}`).once('value');
     if (!snap.exists()) throw new Error('Room not found. Check the code.');
@@ -93,14 +95,23 @@ export class MultiplayerManager {
   startGame() {
     if (this.isHost && this.roomRef) {
       this.roomRef.child('status').set('playing');
+      this.roomRef.child('world/bots').set({});
     }
   }
 
   // ─── REAL-TIME DATA PUSH ─────────────────────────────
-  updatePosition(x, y, z, rotY) {
+  updatePosition(x, y, z, rotY, gx = null, gz = null) {
+    if (!this.roomRef) return;
+    const patch = { x, y, z, rotY, ts: Date.now() };
+    if (gx !== null) patch.gx = gx;
+    if (gz !== null) patch.gz = gz;
+    this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`).update(patch);
+  }
+
+  updateWeapon(weapon) {
     if (!this.roomRef) return;
     this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`)
-      .update({ x, y, z, rotY });
+      .update({ weapon });
   }
 
   updateHealth(health) {
@@ -110,9 +121,13 @@ export class MultiplayerManager {
   }
 
   updateKills(kills, deaths) {
-    if (!this.roomRef) return;
-    this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`)
-      .update({ kills, deaths });
+    this.updateStats(kills, deaths);
+  }
+
+  /** Host: full bot snapshot for all clients. */
+  syncBots(botsByIndex) {
+    if (!this.roomRef || !this.isHost) return;
+    this.roomRef.child('world/bots').set(botsByIndex);
   }
 
   sendHit(targetUid, damage) {
@@ -122,6 +137,28 @@ export class MultiplayerManager {
       target:  targetUid,
       shooter: this.uid,
       damage,
+      ts:      Date.now(),
+    });
+  }
+
+  /** Client → host: damage vs synced bot. */
+  sendBotHit(botIndex, damage) {
+    if (!this.roomRef) return;
+    this.roomRef.child('events').push({
+      type:      'bot_hit',
+      botIndex,
+      damage,
+      shooter:   this.uid,
+      ts:        Date.now(),
+    });
+  }
+
+  /** Ephemeral world events (shots, grenades, bot fire sounds). */
+  sendWorldEvent(evt) {
+    if (!this.roomRef) return;
+    this.roomRef.child('events').push({
+      ...evt,
+      shooter: evt.shooter ?? this.uid,
       ts:      Date.now(),
     });
   }
@@ -142,17 +179,47 @@ export class MultiplayerManager {
   }
 
   // ─── CLEANUP ─────────────────────────────────────────
-  leave() {
-    if (this.roomRef && this.uid) {
-      this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`).remove();
-      this.roomRef.off();
-      this.roomRef = null;
+  /** Leave lobby/game. Host deletes the entire room. */
+  async leave() {
+    if (!this.roomRef || !this.roomCode) return;
+
+    const code    = this.roomCode;
+    const wasHost = this.isHost;
+    const ref     = this.roomRef;
+
+    ref.off();
+    this.roomRef  = null;
+    this.roomCode = null;
+    this.isHost   = false;
+    this.players.clear();
+
+    const playerRef = this.db.ref(`warfront_rooms/${code}/players/${this.uid}`);
+    try { await playerRef.onDisconnect().cancel(); } catch {}
+
+    if (wasHost) {
+      try { await ref.onDisconnect().cancel(); } catch {}
+      await this.db.ref(`warfront_rooms/${code}`).remove();
+    } else {
+      await playerRef.remove();
     }
+  }
+
+  _onRoomClosed() {
+    if (this._roomClosedFired) return;
+    this._roomClosedFired = true;
+
+    this.roomRef?.off();
+    this.roomRef  = null;
+    this.roomCode = null;
+    this.isHost   = false;
+    this.players.clear();
+
+    this.onRoomClosed?.();
   }
 
   // ─── PRIVATE ─────────────────────────────────────────
   _genCode() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no ambiguous O/0/I/1
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
     return Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   }
 
@@ -162,22 +229,62 @@ export class MultiplayerManager {
       weapon,
       isHost,
       x: 0, y: 0, z: 0, rotY: 0,
-      health: 100,
-      kills:  0,
-      deaths: 0,
-      alive:  true,
+      health:  100,
+      kills:   0,
+      deaths:  0,
+      assists: 0,
+      alive:   true,
+      ts:      0,
     };
   }
 
+  /** Persist local kills/deaths (+ optional assists from events). */
+  updateStats(kills, deaths, assists = null) {
+    if (!this.roomRef) return;
+    const patch = { kills, deaths };
+    if (assists !== null) patch.assists = assists;
+    this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`).update(patch);
+  }
+
+  /** Increment assists for other players (called by killer client). */
+  grantAssists(uids) {
+    if (!this.roomRef || !uids?.length) return;
+    for (const uid of uids) {
+      if (!uid || uid === this.uid) continue;
+      const ref = this.db.ref(`warfront_rooms/${this.roomCode}/players/${uid}/assists`);
+      ref.transaction(v => (v || 0) + 1);
+    }
+  }
+
+  getLeaderboardRows() {
+    return [...this.players.entries()]
+      .map(([uid, d]) => ({
+        uid,
+        name:    d.name || uid,
+        kills:   d.kills   ?? 0,
+        deaths:  d.deaths  ?? 0,
+        assists: d.assists ?? 0,
+        ratio:   (d.kills ?? 0) / Math.max(1, d.deaths ?? 0),
+        isSelf:  uid === this.uid,
+      }))
+      .sort((a, b) => b.kills - a.kills || b.ratio - a.ratio);
+  }
+
   _listen() {
+    this._roomClosedFired = false;
+
+    this.roomRef.on('value', snap => {
+      if (!snap.exists()) {
+        this._onRoomClosed();
+      }
+    });
+
     const playersRef = this.roomRef.child('players');
 
-    // Player list (lobby + position sync)
     playersRef.on('value', snap => {
       const all = snap.val() || {};
       const seenUids = new Set(Object.keys(all));
 
-      // Removals
       for (const uid of this.players.keys()) {
         if (!seenUids.has(uid) && uid !== this.uid) {
           this.players.delete(uid);
@@ -185,7 +292,6 @@ export class MultiplayerManager {
         }
       }
 
-      // Updates / additions
       for (const [uid, data] of Object.entries(all)) {
         this.players.set(uid, data);
         if (uid !== this.uid) {
@@ -196,24 +302,29 @@ export class MultiplayerManager {
       this.onLobbyUpdate?.(this.getLobbyPlayers());
     });
 
-    // Game status
     this.roomRef.child('status').on('value', snap => {
       if (snap.val() === 'playing') {
         this.onGameStart?.();
       }
     });
 
-    // Incoming hit events
+    this.roomRef.child('world/bots').on('value', snap => {
+      this.onBotsUpdate?.(snap.val() || {});
+    });
+
     this.roomRef.child('events').on('child_added', snap => {
       const evt = snap.val();
-      if (evt?.target === this.uid) {
+      if (!evt) return;
+
+      if (evt.type === 'hit' && evt.target === this.uid) {
         this.onHitReceived?.(evt);
+      } else {
+        this.onWorldEvent?.(evt);
       }
-      // Remove after reading so the list stays small
+
       snap.ref.remove();
     });
 
-    // Auto-remove on disconnect
     this.db
       .ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`)
       .onDisconnect()

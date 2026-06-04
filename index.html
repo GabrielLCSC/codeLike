@@ -11,6 +11,7 @@
 
   <!-- Firebase compat (must load before modules) -->
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 
   <!-- Three.js importmap -->
@@ -25,8 +26,49 @@
 </head>
 <body>
 
+  <!-- ═══════════════════════════════════════ AUTH ═══════════ -->
+  <div id="auth-overlay">
+    <div id="screen-auth" class="screen active">
+      <div class="scanlines"></div>
+      <div class="auth-panel">
+        <div class="title-block">
+          <div class="title-pre">TACTICAL BROWSER</div>
+          <h1 class="game-title auth-title">WARFRONT</h1>
+          <div class="title-line"></div>
+        </div>
+
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" id="tab-login" data-tab="login">LOGIN</button>
+          <button type="button" class="auth-tab" id="tab-signup" data-tab="signup">SIGN UP</button>
+        </div>
+
+        <form id="form-login" class="auth-form" autocomplete="on">
+          <label class="setting-label">PSEUDO</label>
+          <input type="text" id="inp-login-pseudo" class="setting-input" maxlength="16" autocomplete="username" required>
+          <label class="setting-label">PASSWORD</label>
+          <input type="password" id="inp-login-password" class="setting-input" autocomplete="current-password" required>
+          <button type="submit" class="confirm-btn">LOGIN →</button>
+        </form>
+
+        <form id="form-signup" class="auth-form hidden" autocomplete="on">
+          <label class="setting-label">PSEUDO</label>
+          <input type="text" id="inp-signup-pseudo" class="setting-input" maxlength="16" autocomplete="username" required>
+          <p class="auth-hint">3–16 characters: letters, numbers, underscore</p>
+          <label class="setting-label">PASSWORD</label>
+          <input type="password" id="inp-signup-password" class="setting-input" autocomplete="new-password" required>
+          <label class="setting-label">CONFIRM PASSWORD</label>
+          <input type="password" id="inp-signup-password2" class="setting-input" autocomplete="new-password" required>
+          <button type="submit" class="confirm-btn">CREATE ACCOUNT →</button>
+        </form>
+
+        <p id="auth-error" class="auth-error"></p>
+        <p id="auth-busy" class="auth-busy hidden">Please wait…</p>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════ MENU OVERLAY ═══ -->
-  <div id="menu-overlay">
+  <div id="menu-overlay" style="display:none">
 
     <!-- MAIN SCREEN -->
     <div id="screen-main" class="screen active">
@@ -44,10 +86,14 @@
           <button class="menu-btn" id="btn-multiplayer">
             <span class="btn-bracket">[</span> MULTIPLAYER <span class="btn-bracket">]</span>
           </button>
+          <button class="menu-btn menu-btn--secondary" id="btn-profile">
+            <span class="btn-bracket">[</span> PROFILE <span class="btn-bracket">]</span>
+          </button>
           <button class="menu-btn menu-btn--secondary" id="btn-settings">
             <span class="btn-bracket">[</span> SETTINGS <span class="btn-bracket">]</span>
           </button>
         </nav>
+        <p class="menu-user-line">Signed in as <span id="lbl-menu-user">—</span></p>
         <div class="menu-footer">ZQSD TO MOVE · MOUSE TO AIM · CLICK TO SHOOT · R RELOAD · RMB SCOPE</div>
       </div>
     </div>
@@ -131,10 +177,6 @@
       </div>
       <div class="settings-body">
         <div class="setting-group">
-          <label class="setting-label">USERNAME</label>
-          <input type="text" id="inp-username" class="setting-input" maxlength="16" placeholder="Ghost">
-        </div>
-        <div class="setting-group">
           <label class="setting-label">MOUSE SENSITIVITY — <span id="lbl-sens">2.0</span></label>
           <input type="range" id="inp-sens" class="setting-slider" min="0.5" max="5.0" step="0.1" value="2.0">
         </div>
@@ -151,6 +193,40 @@
         </div>
       </div>
       <button class="confirm-btn" id="btn-save-settings">SAVE SETTINGS →</button>
+    </div>
+
+    <!-- PROFILE SCREEN -->
+    <div id="screen-profile" class="screen">
+      <div class="screen-header">
+        <button class="back-btn" id="btn-back-profile">← BACK</button>
+        <h2>PROFILE</h2>
+        <div class="header-rule"></div>
+      </div>
+      <div class="profile-body">
+        <div class="setting-group">
+          <label class="setting-label">PSEUDO</label>
+          <input type="text" id="inp-profile-pseudo" class="setting-input" maxlength="16">
+        </div>
+        <button class="confirm-btn confirm-btn--secondary" id="btn-save-pseudo">SAVE PSEUDO</button>
+        <p id="profile-error" class="auth-error"></p>
+
+        <h3 class="profile-stats-title">LIFETIME STATS</h3>
+        <table class="profile-stats-table">
+          <thead>
+            <tr><th>KILLS</th><th>DEATHS</th><th>ASSISTS</th><th>K/D</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td id="prof-kills">0</td>
+              <td id="prof-deaths">0</td>
+              <td id="prof-assists">0</td>
+              <td id="prof-ratio">0.00</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <button class="menu-btn menu-btn--secondary profile-logout" id="btn-logout">LOG OUT</button>
+      </div>
     </div>
 
     <!-- MULTIPLAYER SCREEN -->
@@ -222,11 +298,21 @@
       <div id="health-bar-wrap">
         <div id="health-bar"></div>
       </div>
-      <span id="hud-health-val">100</span>
+    </div>
+
+    <div id="hud-ammo-hint" class="hidden">
+      <span class="ammo-hint-key">F</span> Resupply ammo
+    </div>
+
+    <div id="hud-grenade-hint" class="hidden">
+      <span class="grenade-hint-title">GRENADE</span>
+      <div id="hud-grenade-fuse-track"><div id="hud-grenade-fuse-fill"></div></div>
+      <span id="hud-grenade-fuse-lbl">4.0</span>
     </div>
 
     <!-- Bottom-right: ammo + weapon -->
     <div id="hud-ammo">
+      <span id="hud-grenades">G 2</span>
       <span id="hud-weapon-name">ASSAULT RIFLE</span>
       <div class="ammo-nums">
         <span id="hud-ammo-mag">30</span>
@@ -255,6 +341,26 @@
     <!-- Minimap -->
     <canvas id="minimap"></canvas>
 
+    <!-- Match scoreboard (hold Tab — solo bots + multiplayer) -->
+    <div id="hud-leaderboard" class="hidden">
+      <div class="lb-panel">
+        <div class="lb-title">MATCH LEADERBOARD</div>
+        <table class="lb-table">
+          <thead>
+            <tr>
+              <th>Player</th>
+              <th>K</th>
+              <th>A</th>
+              <th>D</th>
+              <th>K/D</th>
+            </tr>
+          </thead>
+          <tbody id="hud-leaderboard-body"></tbody>
+        </table>
+        <div class="lb-hint">Hold Tab</div>
+      </div>
+    </div>
+
     <!-- Medal overlay (shown on kill streaks 3 / 5 / 10) -->
     <img id="medal-display" class="hidden" alt="medal">
 
@@ -271,9 +377,13 @@
         <span>Mouse</span> Aim &nbsp;|&nbsp;
         <span>LMB</span> Shoot &nbsp;|&nbsp;
         <span>RMB</span> Scope &nbsp;|&nbsp;
+        <span>E</span> Hold grenade · release throw &nbsp;|&nbsp;
         <span>R</span> Reload &nbsp;|&nbsp;
+        <span>F</span> Ammo chest &nbsp;|&nbsp;
         <span>Space</span> Jump &nbsp;|&nbsp;
-        <span>Shift</span> Sprint
+        <span>Shift</span> Sprint &nbsp;|&nbsp;
+        <span>Esc</span> Pause / settings &nbsp;|&nbsp;
+        <span>Tab</span> Leaderboard <span class="plo-mp-only">(multi)</span>
       </div>
 
       <!-- In-game settings panel -->

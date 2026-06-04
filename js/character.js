@@ -283,11 +283,16 @@ export function updateCharacterAnimation(rig, delta, pose) {
   const R = rig.rightArm;
   const LL = rig.leftLeg;
   const RL = rig.rightLeg;
-  const t  = Math.min(1, delta * 10);
+  const isGait = pose === 'walk' || pose === 'run';
+  const t  = Math.min(1, delta * (isGait ? 14 : 8));
 
   const lerp = (obj, prop, target) => {
     obj[prop] = THREE.MathUtils.lerp(obj[prop], target, t);
   };
+  const set = (obj, prop, value) => {
+    obj[prop] = value;
+  };
+  const apply = isGait ? set : lerp;
 
   // Torso bob reset
   let bobY = 0;
@@ -346,33 +351,33 @@ export function updateCharacterAnimation(rig, delta, pose) {
     lerp(RL.group.rotation, 'x', 0);
     lerp(RL.knee.rotation, 'x', 0);
   } else {
-    // walk / run gait with knee & elbow bend
+    // walk / run — drive gait directly (lerping sin targets causes stutter)
     const isRun = pose === 'run';
-    const freq  = isRun ? 11 : 6;
-    const amp   = isRun ? 0.72 : 0.48;
+    const freq  = isRun ? 9.5 : 5.5;
+    const amp   = isRun ? 0.62 : 0.44;
     rig.animPhase += delta * freq;
     const s  = Math.sin(rig.animPhase);
     const s2 = Math.sin(rig.animPhase + Math.PI);
 
-    lerp(L.group.rotation, 'x',  s * amp * 0.75);
-    lerp(L.elbow.rotation, 'x', -Math.abs(s) * 0.55);
-    lerp(R.group.rotation, 'x',  s2 * amp * 0.75);
-    lerp(R.elbow.rotation, 'x', -Math.abs(s2) * 0.55);
+    apply(L.group.rotation, 'x',  s * amp * 0.75);
+    apply(L.elbow.rotation, 'x', -Math.abs(s) * 0.5);
+    apply(R.group.rotation, 'x',  s2 * amp * 0.75);
+    apply(R.elbow.rotation, 'x', -Math.abs(s2) * 0.5);
 
-    lerp(LL.group.rotation, 'x', -s * amp);
-    lerp(LL.knee.rotation, 'x', Math.max(0, s) * amp * 1.1);
-    lerp(RL.group.rotation, 'x', -s2 * amp);
-    lerp(RL.knee.rotation, 'x', Math.max(0, s2) * amp * 1.1);
+    apply(LL.group.rotation, 'x', -s * amp);
+    apply(LL.knee.rotation, 'x', Math.max(0, s) * amp * 1.05);
+    apply(RL.group.rotation, 'x', -s2 * amp);
+    apply(RL.knee.rotation, 'x', Math.max(0, s2) * amp * 1.05);
 
-    bobY = Math.abs(Math.sin(rig.animPhase * 2)) * (isRun ? 0.045 : 0.025);
-    torsoLean = isRun ? 0.12 : 0.05;
+    bobY = Math.abs(Math.sin(rig.animPhase * 2)) * (isRun ? 0.04 : 0.022);
+    torsoLean = isRun ? 0.1 : 0.05;
 
-    if (R.weapon) lerp(R.weapon.rotation, 'x', -0.55 + Math.sin(rig.animPhase) * 0.04);
+    if (R.weapon) apply(R.weapon.rotation, 'x', -0.55 + Math.sin(rig.animPhase) * 0.035);
   }
 
   lerp(rig.torso.rotation, 'x', torsoLean);
   lerp(rig.head.rotation, 'x', headLean);
-  rig.torso.position.y = 0.92 + bobY;
+  rig.torso.position.y = THREE.MathUtils.lerp(rig.torso.position.y, 0.92 + bobY, Math.min(1, delta * 12));
 }
 
 /** Reset all joint rotations (e.g. on respawn). */
@@ -454,10 +459,17 @@ export function billboardCharacterLabels(mesh, camera, healthBar, healthRatio = 
   updateCharacterOverheadUI(mesh, camera, null, { healthBar, healthRatio });
 }
 
-/** Map bot AI state → animation pose. */
-export function botStateToPose(state, atCoverPoint = false) {
-  if (state === 'attack') return 'aim';
-  if (state === 'cover')  return atCoverPoint ? 'cover' : 'run';
-  if (state === 'chase')  return 'run';
-  return 'walk';
+/**
+ * World yaw (Y) so character +Z (vest / visor) points toward (dx, dz).
+ * Mesh is authored facing +Z; backpack at -Z.
+ */
+export function yawToward(dx, dz) {
+  return Math.atan2(dx, dz);
+}
+
+/** Map bot AI phase → animation pose. */
+export function botStateToPose(state, moving = true) {
+  if (state === 'engage' || state === 'attack') return 'aim';
+  if (moving) return 'run';
+  return 'idle';
 }

@@ -201,6 +201,7 @@ export class WeaponSystem {
     this._sprintBlend  = 0;   // 0 = combat pose, 1 = tactical sprint pose
     this._walkPhase    = 0;
     this._sprintPhase  = 0;
+    this._viewSuppressed = false;
 
     // ── 3-D objects ────────────────────────────────────────
     /** @type {THREE.Group} */  this.group  = null;
@@ -276,6 +277,17 @@ export class WeaponSystem {
     sound.play('empty_click', { volume: 0.6 });
   }
 
+  /** Full mag + full reserve (ammo chest / resupply). */
+  refillAmmo() {
+    clearTimeout(this._reloadTimer);
+    this.reloading     = false;
+    this._reloadAnimOn = false;
+    this.ammo          = this.def.magSize;
+    this.reserve       = this.def.reserve;
+    this.onReloadComplete?.();
+    this.onAmmoChanged?.();
+  }
+
   reload() {
     if (this.reloading || this.ammo === this.def.magSize || this.reserve === 0) return;
     this.reloading     = true;
@@ -327,6 +339,12 @@ export class WeaponSystem {
 
   /** True when the viewmodel is in tactical high-ready sprint pose. */
   get isTacticalSprint() { return this._sprintBlend > 0.5; }
+
+  /** Hide FP weapon while holding a grenade. */
+  setViewSuppressed(on) {
+    this._viewSuppressed = on;
+    if (this.group) this.group.visible = !on;
+  }
 
   // ── Per-frame update ───────────────────────────────────────
 
@@ -399,7 +417,7 @@ export class WeaponSystem {
     const cy = REST_POS.y - bobY - reloadDrop + walkGunY;
     const cz = REST_POS.z - this._recoilZ;
 
-    if (this.group) {
+    if (this.group && !this._viewSuppressed) {
       this.group.position.set(
         THREE.MathUtils.lerp(cx, SPRINT_POS.x + shX, sb),
         THREE.MathUtils.lerp(cy, SPRINT_POS.y + shY, sb),
@@ -463,7 +481,7 @@ export class WeaponSystem {
 
     // Muzzle flash positioned at the bore axis tip for this weapon
     const flashPos = FLASH_OFFSET[key] ?? FLASH_OFFSET.assault_rifle;
-    this._flash = this._buildMuzzleFlash();
+    this._flash = this._buildMuzzleFlash(key);
     this._flash.position.copy(flashPos);
     this._flash.visible = false;
     group.add(this._flash);
@@ -473,19 +491,24 @@ export class WeaponSystem {
     this.group = group;
   }
 
-  _buildMuzzleFlash() {
+  _buildMuzzleFlash(weaponKey) {
     const g = new THREE.Group();
+    const ar = weaponKey === 'assault_rifle';
+    const s  = ar ? 1.22 : 1;
     const coreMat = new THREE.MeshBasicMaterial({
       color: 0xffffee, transparent: true, opacity: 1, depthWrite: false,
     });
     const hotMat = new THREE.MeshBasicMaterial({
-      color: 0xffaa33, transparent: true, opacity: 0.95, depthWrite: false,
+      color: 0xffaa33, transparent: true, opacity: ar ? 1 : 0.95, depthWrite: false,
     });
     const flareMat = new THREE.MeshBasicMaterial({
-      color: 0xff6600, transparent: true, opacity: 0.75, depthWrite: false,
+      color: 0xff6600, transparent: true, opacity: ar ? 0.88 : 0.75, depthWrite: false,
     });
 
-    g.add(new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.018, 0.04), coreMat));
+    g.add(new THREE.Mesh(
+      new THREE.BoxGeometry(0.018 * s, 0.018 * s, 0.04 * s),
+      coreMat,
+    ));
 
     const petals = [
       [0.055, 0.012, 0.008, 0, 0, 0],
@@ -496,25 +519,50 @@ export class WeaponSystem {
       [0.028, 0.005, 0.038, 0, Math.PI / 3, Math.PI / 6],
     ];
     petals.forEach(([w, h, d, rx, ry, rz]) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), flareMat.clone());
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(w * s, h * s, d * s),
+        flareMat.clone(),
+      );
       m.rotation.set(rx, ry, rz);
       g.add(m);
     });
 
-    const side = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.025, 0.012), hotMat);
+    const side = new THREE.Mesh(
+      new THREE.BoxGeometry(0.09 * s, 0.025 * s, 0.012 * s),
+      hotMat,
+    );
     side.rotation.z = Math.PI / 2;
     g.add(side);
 
-    g.add(new THREE.PointLight(0xff9922, 5, 2.8));
+    const light = new THREE.PointLight(0xff9922, ar ? 7.2 : 5, ar ? 3.6 : 2.8);
+    g.add(light);
+    g.userData.muzzleLight = light;
+    g.userData.arBloom = ar;
     return g;
   }
 
   _showFlash() {
     if (!this._flash) return;
+    const ar = this._flash.userData.arBloom;
+    const ads = this.isADS;
+    const bloom = ar ? (ads ? 1.18 : 1.28) : 1;
+    const light = this._flash.userData.muzzleLight;
+    if (light) {
+      light.intensity = (ar ? 7.2 : 5) * bloom;
+      light.distance  = ar ? (ads ? 3.8 : 4.0) : 2.8;
+    }
     this._flash.visible = true;
     this._flash.rotation.z = Math.random() * Math.PI * 2;
+    this._flash.scale.setScalar(bloom);
     clearTimeout(this._flashOff);
-    this._flashOff = setTimeout(() => { this._flash.visible = false; }, 48);
+    this._flashOff = setTimeout(() => {
+      this._flash.visible = false;
+      this._flash.scale.setScalar(1);
+      if (light) {
+        light.intensity = ar ? 7.2 : 5;
+        light.distance  = ar ? 3.6 : 2.8;
+      }
+    }, ar ? 56 : 48);
   }
 
   _emitMuzzleEffects() {

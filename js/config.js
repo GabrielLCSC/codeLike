@@ -20,13 +20,43 @@ export const JUMP_FORCE    = 5.0;
 export const REGEN_DELAY   = 5500;  // ms without damage before regen starts
 export const REGEN_RATE    = 14;    // HP per second while regenerating
 export const RESPAWN_TIME  = 5;     // seconds
-export const HEADSHOT_MULT = 2.5;   // damage multiplier for headshots
+/** Player / bot max HP — bodyDamage × 4 or headDamage × 2 (AR & shotgun). */
+export const MAX_HEALTH = 100;
+
+/** World distance (XZ) to use an ammo chest. */
+export const AMMO_CHEST_RADIUS = 2.75;
+/** Cooldown after resupplying at a chest (ms). */
+export const AMMO_CHEST_COOLDOWN_MS = 59000;
+
+/** Grid cell sync for multiplayer (not fog-of-war). */
+export const MAP_SCAN_RADIUS    = 2;
+/** Minimap: half-width of visible world area (metres). */
+export const MINIMAP_VIEW_RADIUS = 22;
+/** Enemy ping on minimap every N seconds. */
+export const MINIMAP_PING_INTERVAL = 4;
+export const MINIMAP_PING_FADE_MS   = 4000;
+/** Spawn / chest separation — occupancy counted within this range. */
+export const SPAWN_OCCUPANCY_RADIUS = 8;
+/** Assists credited if you damaged target within this window (ms). */
+export const ASSIST_WINDOW_MS   = 5000;
+/** How often bots refresh their chase waypoint toward the player (seconds). */
+export const BOT_PLAYER_TRACK_INTERVAL = 5;
+
+// ─── GRENADES ────────────────────────────────────────────────
+export const GRENADE_MAX         = 2;
+export const GRENADE_FUSE_S       = 4;    // seconds from unpin until boom
+export const GRENADE_THROW_SPEED  = 16;
+export const GRENADE_THROW_LIFT   = 5;
+export const GRENADE_DAMAGE       = 110;
+export const GRENADE_RADIUS       = 6.5;
+export const GRENADE_GRAVITY      = 20;
 
 // ─── WEAPONS ─────────────────────────────────────────────────
 export const WEAPONS = {
   assault_rifle: {
     name:        'ASSAULT RIFLE',
-    damage:      22,
+    bodyDamage:  25,   // 4 body shots to kill @ 100 HP
+    headDamage:  50,   // 2 head shots
     fireRate:    640,          // rounds per minute
     reloadTime:  2200,         // ms
     magSize:     30,
@@ -43,7 +73,8 @@ export const WEAPONS = {
   },
   shotgun: {
     name:        'SHOTGUN',
-    damage:      18,           // per pellet (8 pellets = 144 max)
+    bodyDamage:  MAX_HEALTH,        // all 8 pellets on body = kill (12.5 each)
+    headDamage:  MAX_HEALTH * 2,    // 4+ head pellets = kill (25 each)
     fireRate:    68,
     reloadTime:  3400,
     magSize:     6,
@@ -60,7 +91,8 @@ export const WEAPONS = {
   },
   sniper: {
     name:        'SNIPER RIFLE',
-    damage:      145,
+    bodyDamage:  100,  // one shot kill
+    headDamage:  100,
     fireRate:    48,
     reloadTime:  3000,
     magSize:     5,
@@ -78,62 +110,30 @@ export const WEAPONS = {
   },
 };
 
-// ─── BOT CONFIG ───────────────────────────────────────────────
+// ─── BOT CONFIG (AI implementation: js/bots/) ─────────────────
 export const BOT_COUNT      = 3;
-export const BOT_HEALTH     = 100;
+export const BOT_HEALTH     = MAX_HEALTH;
 export const BOT_DAMAGE     = 14;      // HP per hit (all difficulties)
 export const BOT_RESPAWN_MS = 14000;   // ms before bot respawns
 
-/** Difficulty configs — passed directly to Bot constructor as `cfg`. */
+/** Shared bot movement / combat (same for every difficulty). */
+export const BOT_SPEED         = 4.5;   // march speed (world units / s)
+export const BOT_ATTACK_RANGE  = 22;    // start shooting with LOS within this range
+export const BOT_SHOOT_MIN     = 850;   // ms between shots (base)
+export const BOT_SHOOT_JITTER  = 550;
+export const BOT_STRAFES       = true;
+
+/** Difficulty — only accuracy (`hitBase`) changes. */
 export const BOT_LEVELS = {
-  private: {
-    label:       'PRIVATE',
-    speed:        2.6,
-    detectRange:  9,
-    attackRange:  7,
-    hitBase:      0.18,   // accuracy at close range (scales with distance)
-    shootMin:     1900,   // ms between shots (base)
-    shootJitter:  1200,
-    seeksCover:   false,
-    strafes:      false,
-  },
-  corporal: {
-    label:       'CORPORAL',
-    speed:        3.2,
-    detectRange:  14,
-    attackRange:  11,
-    hitBase:      0.35,
-    shootMin:     1100,
-    shootJitter:  800,
-    seeksCover:   false,
-    strafes:      true,
-  },
-  commando: {
-    label:       'COMMANDO',
-    speed:        3.9,
-    detectRange:  18,
-    attackRange:  14,
-    hitBase:      0.55,
-    shootMin:     700,
-    shootJitter:  500,
-    seeksCover:   true,
-    strafes:      true,
-  },
-  veteran: {
-    label:       'VETERAN',
-    speed:        4.6,
-    detectRange:  22,
-    attackRange:  17,
-    hitBase:      0.72,
-    shootMin:     450,
-    shootJitter:  280,
-    seeksCover:   true,
-    strafes:      true,
-  },
+  private:  { label: 'PRIVATE',  hitBase: 0.18 },
+  corporal: { label: 'CORPORAL', hitBase: 0.35 },
+  commando: { label: 'COMMANDO', hitBase: 0.55 },
+  veteran:  { label: 'VETERAN',  hitBase: 0.72 },
 };
 
 // ─── MULTIPLAYER ─────────────────────────────────────────────
 export const SYNC_INTERVAL    = 50;   // ms between position syncs
+export const BOT_SYNC_INTERVAL = 80;  // ms — host bot snapshot rate (multi)
 export const MAX_PLAYERS      = 4;
 
 // ─── FIREBASE CONFIG ──────────────────────────────────────────

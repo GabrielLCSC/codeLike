@@ -5,10 +5,10 @@
 import { Game }               from './game.js';
 import { MultiplayerManager } from './multiplayer.js';
 import { sound }              from './sound.js';
+import { auth }                 from './auth.js';
 
 // ─── SETTINGS (persisted in localStorage) ───────────────
 const DEFAULTS = {
-  username:    'Ghost',
   sensitivity: 2.0,
   fov:         75,
   weapon:      'assault_rifle',
@@ -39,8 +39,11 @@ function showScreen(id) {
 }
 
 // ─── POPULATE SETTINGS UI ────────────────────────────────
+function syncUsernameFromAuth() {
+  settings.username = auth.displayName;
+}
+
 function applySettingsToUI() {
-  document.getElementById('inp-username').value = settings.username;
   document.getElementById('inp-sens').value     = settings.sensitivity;
   document.getElementById('inp-fov').value      = settings.fov;
   document.getElementById('lbl-sens').textContent = Number(settings.sensitivity).toFixed(1);
@@ -72,6 +75,89 @@ function setupGunCards() {
 }
 
 // ─── GAME LAUNCHER ───────────────────────────────────────
+async function flushMatchStatsToProfile() {
+  if (!auth.isLoggedIn) return;
+
+  let kills = 0;
+  let deaths = 0;
+  let assists = 0;
+
+  if (activeGame?.mode === 'multi' && mp?.uid) {
+    const p = mp.players.get(mp.uid);
+    if (p) {
+      kills   = p.kills   ?? 0;
+      deaths  = p.deaths  ?? 0;
+      assists = p.assists ?? 0;
+    }
+  } else if (activeGame) {
+    kills  = activeGame.kills;
+    deaths = activeGame.deaths;
+  }
+
+  if (kills + deaths + assists > 0) {
+    await auth.addMatchStats({ kills, deaths, assists });
+  }
+}
+
+function showAuth() {
+  document.getElementById('auth-overlay').style.display = '';
+  document.getElementById('menu-overlay').style.display = 'none';
+  showScreen('screen-auth');
+}
+
+function showAppMenu() {
+  document.getElementById('auth-overlay').style.display = 'none';
+  document.getElementById('menu-overlay').style.display = '';
+  syncUsernameFromAuth();
+  const lbl = document.getElementById('lbl-menu-user');
+  if (lbl) lbl.textContent = auth.displayName;
+  showScreen('screen-main');
+}
+
+function applyProfileToUI() {
+  const p = auth.profile;
+  if (!p) return;
+  const inp = document.getElementById('inp-profile-pseudo');
+  if (inp) inp.value = p.pseudo;
+  const k = p.kills ?? 0;
+  const d = p.deaths ?? 0;
+  const a = p.assists ?? 0;
+  const ratio = k / Math.max(1, d);
+  $('prof-kills', k);
+  $('prof-deaths', d);
+  $('prof-assists', a);
+  $('prof-ratio', ratio.toFixed(2));
+}
+
+function $(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setAuthTab(tab) {
+  const login = tab === 'login';
+  document.getElementById('form-login').classList.toggle('hidden', !login);
+  document.getElementById('form-signup').classList.toggle('hidden', login);
+  document.getElementById('tab-login').classList.toggle('active', login);
+  document.getElementById('tab-signup').classList.toggle('active', !login);
+  clearAuthError();
+}
+
+function setAuthBusy(busy) {
+  document.getElementById('auth-busy').classList.toggle('hidden', !busy);
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('auth-error');
+  el.textContent = msg || '';
+}
+
+function clearAuthError() {
+  showAuthError('');
+  const pe = document.getElementById('profile-error');
+  if (pe) pe.textContent = '';
+}
+
 function launchGame(mode, mpInstance = null) {
   document.getElementById('menu-overlay').style.display = 'none';
 
@@ -101,12 +187,13 @@ function _startGame(mode, mpInstance) {
     activeGame.stop();
     activeGame = null;
   }
+  syncUsernameFromAuth();
   activeGame = new Game({
     mode,
     weapon:      settings.weapon,
     sensitivity: settings.sensitivity,
     fov:         settings.fov,
-    username:    settings.username,
+    username:    auth.displayName,
     adsMode:     settings.adsMode,
     botCount:    settings.botCount,
     botLevel:    settings.botLevel,
@@ -115,12 +202,39 @@ function _startGame(mode, mpInstance) {
   activeGame.start();
 }
 
-function exitToMenu() {
+function handleRoomClosed() {
+  if (activeGame) {
+    activeGame.stop({ leaveRoom: false });
+    activeGame = null;
+  }
+  mp = null;
+  showMpError('Room closed — the host left.');
+  document.getElementById('btn-start-game').style.display = 'none';
+  document.getElementById('lbl-lobby-status').style.display = 'none';
+  showScreen('screen-multiplayer');
+}
+
+function wireRoomClosedHandlers() {
+  if (!mp) return;
+  mp.onRoomClosed = handleRoomClosed;
+}
+
+async function exitToMenu() {
+  try {
+    await flushMatchStatsToProfile();
+  } catch (e) {
+    console.warn('Stats sync failed', e);
+  }
   if (activeGame) {
     activeGame.stop();
     activeGame = null;
   }
-  mp = null;
+  if (mp) {
+    await mp.leave().catch(() => {});
+    mp = null;
+  } else {
+    mp = null;
+  }
   document.getElementById('menu-overlay').style.display = '';
   document.getElementById('hud').classList.add('hidden');
   document.getElementById('pointer-lock-overlay').classList.add('hidden');
@@ -151,6 +265,7 @@ function renderLobby(players) {
 document.addEventListener('DOMContentLoaded', () => {
   applySettingsToUI();
   setupGunCards();
+  setAuthTab('login');
 
   // Pre-load SFX; unlock AudioContext on first pointer/key (browser policy)
   const soundReady = sound.init();
@@ -170,9 +285,61 @@ document.addEventListener('DOMContentLoaded', () => {
       sound.play('ui_hover', { volume: 0.25 });
     });
   }
-  document.querySelectorAll('.menu-btn, .confirm-btn, .back-btn').forEach(btn => {
+  document.querySelectorAll('.menu-btn, .confirm-btn, .back-btn, .auth-tab').forEach(btn => {
     btn.addEventListener('click',      uiClick);
     btn.addEventListener('mouseenter', uiHover);
+  });
+
+  // ── Auth ─────────────────────────────────────────────
+  auth.init().then(() => {
+    if (auth.isLoggedIn) showAppMenu();
+    else showAuth();
+  }).catch(e => {
+    showAuthError(e.message || 'Firebase failed to load. Check firebase-config.js');
+    showAuth();
+  });
+
+  document.getElementById('tab-login').addEventListener('click', () => setAuthTab('login'));
+  document.getElementById('tab-signup').addEventListener('click', () => setAuthTab('signup'));
+
+  document.getElementById('form-login').addEventListener('submit', async e => {
+    e.preventDefault();
+    clearAuthError();
+    setAuthBusy(true);
+    try {
+      await auth.signIn(
+        document.getElementById('inp-login-pseudo').value,
+        document.getElementById('inp-login-password').value,
+      );
+      showAppMenu();
+    } catch (err) {
+      showAuthError(err.message || 'Login failed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  });
+
+  document.getElementById('form-signup').addEventListener('submit', async e => {
+    e.preventDefault();
+    clearAuthError();
+    const p1 = document.getElementById('inp-signup-password').value;
+    const p2 = document.getElementById('inp-signup-password2').value;
+    if (p1 !== p2) {
+      showAuthError('Passwords do not match.');
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      await auth.signUp(
+        document.getElementById('inp-signup-pseudo').value,
+        p1,
+      );
+      showAppMenu();
+    } catch (err) {
+      showAuthError(err.message || 'Sign up failed.');
+    } finally {
+      setAuthBusy(false);
+    }
   });
 
   // ── Bot count stepper ────────────────────────────────
@@ -226,6 +393,32 @@ document.addEventListener('DOMContentLoaded', () => {
     showScreen('screen-settings');
   });
 
+  document.getElementById('btn-profile').addEventListener('click', () => {
+    applyProfileToUI();
+    showScreen('screen-profile');
+  });
+
+  document.getElementById('btn-back-profile').addEventListener('click', () => {
+    showScreen('screen-main');
+  });
+
+  document.getElementById('btn-save-pseudo').addEventListener('click', async () => {
+    clearAuthError();
+    try {
+      await auth.updatePseudo(document.getElementById('inp-profile-pseudo').value);
+      syncUsernameFromAuth();
+      document.getElementById('lbl-menu-user').textContent = auth.displayName;
+      applyProfileToUI();
+    } catch (err) {
+      document.getElementById('profile-error').textContent = err.message || 'Could not save.';
+    }
+  });
+
+  document.getElementById('btn-logout').addEventListener('click', async () => {
+    await auth.signOut();
+    showAuth();
+  });
+
   // ── Loadout ──────────────────────────────────────────
   document.getElementById('btn-back-loadout').addEventListener('click', () => {
     showScreen('screen-main');
@@ -262,7 +455,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('btn-save-settings').addEventListener('click', () => {
-    settings.username    = document.getElementById('inp-username').value.trim() || 'Ghost';
     settings.sensitivity = parseFloat(document.getElementById('inp-sens').value);
     settings.fov         = parseInt(document.getElementById('inp-fov').value);
     saveSettings(settings);
@@ -282,15 +474,16 @@ document.addEventListener('DOMContentLoaded', () => {
     clearMpError();
     try {
       mp = new MultiplayerManager();
-      mp.init();
+      mp.init(auth.uid);
 
-      const code = await mp.hostRoom(settings.username, settings.weapon);
+      const code = await mp.hostRoom(auth.displayName, settings.weapon);
 
       document.getElementById('lbl-room-code').textContent = code;
       document.getElementById('btn-start-game').style.display = 'inline-block';
       document.getElementById('lbl-lobby-status').style.display = 'none';
 
       mp.onLobbyUpdate = renderLobby;
+      wireRoomClosedHandlers();
 
       showScreen('screen-lobby');
     } catch (e) {
@@ -306,9 +499,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       mp = new MultiplayerManager();
-      mp.init();
+      mp.init(auth.uid);
 
-      await mp.joinRoom(code, settings.username, settings.weapon);
+      await mp.joinRoom(code, auth.displayName, settings.weapon);
 
       document.getElementById('lbl-room-code').textContent = code;
       document.getElementById('btn-start-game').style.display = 'none';
@@ -316,6 +509,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       mp.onLobbyUpdate = renderLobby;
       mp.onGameStart   = () => launchGame('multi', mp);
+      wireRoomClosedHandlers();
 
       showScreen('screen-lobby');
     } catch (e) {
@@ -325,8 +519,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Lobby ─────────────────────────────────────────────
-  document.getElementById('btn-back-lobby').addEventListener('click', () => {
-    if (mp) { mp.leave(); mp = null; }
+  document.getElementById('btn-back-lobby').addEventListener('click', async () => {
+    if (mp) {
+      await mp.leave();
+      mp = null;
+    }
     showScreen('screen-multiplayer');
   });
 
@@ -339,7 +536,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Exit-to-menu button (shown in pointer-lock overlay) ──
   document.getElementById('btn-exit-to-menu').addEventListener('click', e => {
     e.stopPropagation();
-    exitToMenu();
+    void exitToMenu();
   });
 
   // ── Resume button ─────────────────────────────────────

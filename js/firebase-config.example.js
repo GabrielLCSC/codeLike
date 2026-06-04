@@ -1,5 +1,10 @@
 // Copy this file to firebase-config.js and fill in your values.
 // firebase-config.js is gitignored — never committed.
+//
+// Setup for accounts + profiles:
+// 1. Firebase Console → Authentication → enable Email/Password
+// 2. Realtime Database → publish rules from database.rules.json
+// 3. Profiles live under users/{uid}; pseudo uniqueness in users_by_pseudo/
 export const FIREBASE_CONFIG = {
   apiKey:            "YOUR_API_KEY",
   authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",

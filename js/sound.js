@@ -367,6 +367,12 @@ class SoundManager {
     else this.play(key, { volume });
   }
 
+  /** Body / head hit impact — slight delay after the shot registers. */
+  playHitImpact(isHeadshot, { volume = 1.0, delayMs = 50 } = {}) {
+    const key = isHeadshot ? 'headshot' : 'bullet_flesh';
+    setTimeout(() => this.play(key, { volume }), delayMs);
+  }
+
   /**
    * Occasional kill voice line — not every kill; rotates through loaded clips.
    * @param {number} [chance=0.38] — 0–1 probability per kill

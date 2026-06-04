@@ -55,6 +55,9 @@ export class MapGenerator {
     this.grid   = [];
     this.rooms  = [];
     this.spawnPoints  = [];
+    this.ammoChests   = [];
+    /** @type {{ id:string, centerX:number, zMin:number, zMax:number, halfWidth:number }[]} */
+    this.lanes        = [];
     this.wallMeshes   = [];
     this.staticMeshes = [];
 
@@ -68,13 +71,44 @@ export class MapGenerator {
     this.grid = Array.from({ length: this.width }, () => new Uint8Array(this.height));
     this.rooms        = [];
     this.spawnPoints  = [];
+    this.ammoChests   = [];
+    /** @type {{ id:string, centerX:number, zMin:number, zMax:number, halfWidth:number }[]} */
+    this.lanes        = [];
     this.wallMeshes   = [];
     this.staticMeshes = [];
     this._pillarCells = [];
     this._coverCells  = [];
     this._dumpCells   = [];
     this._buildFixedMap();
+    this._initLanes();
     return this;
+  }
+
+  /** Walkable lane centres for bot pathing (left / interior / right). */
+  _initLanes() {
+    this.lanes = [
+      {
+        id: 'left',
+        centerX: W_L_LX,
+        zMin: wz(GZ_SA2),
+        zMax: wz(GZ_LE),
+        halfWidth: (wx(GX_L2) - wx(GX_L1)) * 0.22,
+      },
+      {
+        id: 'mid',
+        centerX: W_MID_X,
+        zMin: wz(GZ_SA2),
+        zMax: wz(GZ_LE),
+        halfWidth: (wx(GX_M2) - wx(GX_M1)) * 0.22,
+      },
+      {
+        id: 'right',
+        centerX: W_R_LX,
+        zMin: wz(GZ_SA2),
+        zMax: wz(GZ_LE),
+        halfWidth: (wx(GX_R2) - wx(GX_R1)) * 0.22,
+      },
+    ];
   }
 
   // ═══════════════════════════════════════════════════════
@@ -203,7 +237,52 @@ export class MapGenerator {
       if (key === 'building' || key === 'concrete') this.wallMeshes.push(mesh);
     }
 
+    this._buildAmmoChests(scene);
     this._buildLighting(scene);
+  }
+
+  /** Ammo crates in mid-lanes (away from spawn zones so bots don't pile up). */
+  _buildAmmoChests(scene) {
+    const laneMidZ = W_LANE_Z;
+
+    this.ammoChests = [
+      { x: W_L_LX, z: laneMidZ },
+      { x: W_R_LX, z: laneMidZ },
+    ];
+
+    const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3d4a32 });
+    const lidMat  = new THREE.MeshLambertMaterial({ color: 0x4a5a3a });
+    const bandMat = new THREE.MeshLambertMaterial({ color: 0xc4a035 });
+    const markMat = new THREE.MeshLambertMaterial({ color: 0x1a1a18 });
+
+    for (const { x, z } of this.ammoChests) {
+      const g = new THREE.Group();
+      g.position.set(x, 0, z);
+
+      const base = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.72, 0.95), bodyMat);
+      base.position.y = 0.36;
+      base.castShadow = true;
+      g.add(base);
+
+      const lid = new THREE.Mesh(new THREE.BoxGeometry(1.38, 0.14, 0.98), lidMat);
+      lid.position.y = 0.79;
+      lid.castShadow = true;
+      g.add(lid);
+
+      const band = new THREE.Mesh(new THREE.BoxGeometry(1.40, 0.10, 1.02), bandMat);
+      band.position.y = 0.52;
+      g.add(band);
+
+      const mark = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.28, 0.04), markMat);
+      mark.position.set(0, 0.58, 0.50);
+      g.add(mark);
+
+      const glow = new THREE.PointLight(0xffcc66, 1.2, 6);
+      glow.position.set(0, 1.0, 0);
+      g.add(glow);
+
+      scene.add(g);
+    }
   }
 
   // ═══════════════════════════════════════════════════════
