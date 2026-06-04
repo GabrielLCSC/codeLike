@@ -91,11 +91,13 @@ export class Game {
     // ── Input ─────────────────────────────────────────────
     this.keys      = new Set();
     this.mouseDown = false;
+    this._emptyClickPlayed = false;
 
     // Raycaster shared across all shots
     this.raycaster    = new THREE.Raycaster();
     this._hitWorldPos = new THREE.Vector3();
     this._playerSpawnSlot = 0;
+    this._claimedSpawns   = new Set();
     this.raycaster.far = 80;
 
     // Bound handlers stored for clean removal
@@ -112,6 +114,10 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   start() {
+    this._claimedSpawns.clear();
+    this.bots = [];
+    this.remotePlayers.clear();
+
     this._initRenderer();
     this._initScene();
     this._initMap();
@@ -131,11 +137,15 @@ export class Game {
 
   stop() {
     sound.stopAmbiance();
+    sound.stopTacticalSprintLoop();
     this.running = false;
     this.controls?.unlock();
     this._unbindInput();
     this.bots.forEach(b => this.scene?.remove(b.mesh));
+    this.bots = [];
     this.remotePlayers.forEach(({ mesh }) => this.scene?.remove(mesh));
+    this.remotePlayers.clear();
+    this._claimedSpawns.clear();
     this.particles?.dispose();
     this.renderer?.dispose();
     this.scene = null;
@@ -237,22 +247,50 @@ export class Game {
 
     // Particles
     this.particles = new ParticleSystem(this.scene);
+    this.weapon.onMuzzleEffects = (pos, dir) => {
+      this.particles.spawnMuzzleSmoke(pos, dir);
+    };
   }
 
   _spawnHalf() {
     return Math.ceil(this.map.spawnPoints.length / 2);
   }
 
+  /**
+   * Reserve a unique spawn index. Tries preferred first, then any free slot.
+   * @param {number|null} preferred
+   * @returns {number}
+   */
+  _claimSpawnSlot(preferred = null) {
+    const n = this.map.spawnPoints.length;
+    if (
+      preferred !== null &&
+      preferred >= 0 &&
+      preferred < n &&
+      !this._claimedSpawns.has(preferred)
+    ) {
+      this._claimedSpawns.add(preferred);
+      return preferred;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!this._claimedSpawns.has(i)) {
+        this._claimedSpawns.add(i);
+        return i;
+      }
+    }
+    return preferred ?? 0;
+  }
+
   /** Unique spawn slot for the local player (spawn zone A). */
   _initPlayerSpawnSlot() {
     const half = this._spawnHalf();
+    let preferred = 0;
     if (this.mp) {
       const humans = [...this.mp.players.keys()].sort();
       const idx    = humans.indexOf(this.mp.uid);
-      this._playerSpawnSlot = idx >= 0 ? idx % half : 0;
-    } else {
-      this._playerSpawnSlot = 0;
+      preferred    = idx >= 0 ? idx % half : 0;
     }
+    this._playerSpawnSlot = this._claimSpawnSlot(preferred);
   }
 
   _getSpawnPos(slotIndex) {
@@ -282,9 +320,11 @@ export class Game {
     const cfg  = BOT_LEVELS[this.opts.botLevel ?? 'corporal'] ?? BOT_LEVELS.corporal;
     const half = this._spawnHalf();
     for (let i = 0; i < count; i++) {
-      const sp      = this._getSpawnPos(half + (i % half)); // spawn zone B — opposite side
-      const onSound = (key, pos, opts) => this._playWorldSound(key, pos, opts);
-      this.bots.push(new Bot(this.scene, sp, this.map, i, cfg, onSound));
+      const preferred = half + (i % half);
+      const slot      = this._claimSpawnSlot(preferred);
+      const sp        = this._getSpawnPos(slot);
+      const onSound   = (key, pos, opts) => this._playWorldSound(key, pos, opts);
+      this.bots.push(new Bot(this.scene, sp, this.map, i, cfg, onSound, slot));
     }
   }
 
@@ -382,7 +422,8 @@ export class Game {
 
     // Weapon system — receives isMoving for bob, mouseDown for recoil recovery gate
     this.weapon.setHitShake(this._hitShake);
-    this.weapon.update(delta, this.isMoving, this.mouseDown);
+    const sprinting = (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) && this.isMoving;
+    this.weapon.update(delta, this.isMoving, this.mouseDown, sprinting);
 
     this._updateBots(delta, nowMs);
     this._updateRemotePlayers(delta);
@@ -491,7 +532,6 @@ export class Game {
 
     if (this.weapon.ammo <= 0) {
       if (this.weapon.reserve > 0) this.weapon.reload();
-      else if (this.weapon.isEmptyClickReady(nowMs)) this.weapon.clickEmpty(nowMs);
       return;
     }
 
@@ -622,6 +662,7 @@ export class Game {
     this.hud.showScorePopup('+100', true);
     this.hud.showMedal(this._killStreak);
     sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
+    sound.playKillVoice(0.38, 300);
     this.hud.setScore(this.kills, this.deaths);
     this.hud.addKillFeed(this.username, victimName);
     this.mp?.updateKills(this.kills, this.deaths);
@@ -639,6 +680,7 @@ export class Game {
     this.mp?.updateKills(this.kills, this.deaths);
 
     sound.play('die', { volume: 1.0 });
+    if (killerName.startsWith('Bot-')) sound.playKillVoice(0.32, 300);
     this.controls.unlock();
     this.weapon.setADS(false);
     this._applyADSState(false);
@@ -806,7 +848,16 @@ export class Game {
     if (!this.controls.isLocked || !this.alive) return;
     if (e.button === 0) {
       this.mouseDown = true;
-      if (!this.weapon.def.automatic) this._tryShoot(performance.now());
+      const nowMs = performance.now();
+      if (this.weapon.ammo <= 0) {
+        if (this.weapon.reserve > 0) this.weapon.reload();
+        else if (!this._emptyClickPlayed) {
+          this.weapon.clickEmpty();
+          this._emptyClickPlayed = true;
+        }
+      } else if (!this.weapon.def.automatic) {
+        this._tryShoot(nowMs);
+      }
     }
     if (e.button === 2) {
       if (this.opts.adsMode === 'hold') {
@@ -818,7 +869,10 @@ export class Game {
   }
 
   _handleMouseUp(e) {
-    if (e.button === 0) this.mouseDown = false;
+    if (e.button === 0) {
+      this.mouseDown = false;
+      this._emptyClickPlayed = false;
+    }
     if (e.button === 2 && this.opts.adsMode === 'hold' && this.weapon.isADS) this._toggleADS();
   }
 

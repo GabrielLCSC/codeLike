@@ -45,14 +45,64 @@ export class ParticleSystem {
     setTimeout(() => this._scene.remove(flash), 70);
   }
 
+  /** Subtle muzzle smoke puffs after a shot (world space). */
+  spawnMuzzleSmoke(point, direction) {
+    const fwd = direction.clone().normalize();
+    const count = 14 + Math.floor(Math.random() * 8);
+    for (let i = 0; i < count; i++) {
+      const baseOpacity = 0.06 + Math.random() * 0.1;
+      const mat = new THREE.MeshBasicMaterial({
+        color:       0xb8b4a8,
+        transparent: true,
+        opacity:     baseOpacity,
+        depthWrite:  false,
+      });
+      const radius = 0.012 + Math.random() * 0.022;
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 6, 5),
+        mat,
+      );
+      mesh.position.copy(point).addScaledVector(fwd, 0.02 + Math.random() * 0.06);
+      mesh.position.add(new THREE.Vector3(
+        (Math.random() - 0.5) * 0.06,
+        (Math.random() - 0.5) * 0.04,
+        (Math.random() - 0.5) * 0.06,
+      ));
+      this._scene.add(mesh);
+
+      const vel = fwd.clone().multiplyScalar(0.15 + Math.random() * 0.28).add(
+        new THREE.Vector3(
+          (Math.random() - 0.5) * 0.14,
+          0.28 + Math.random() * 0.38,
+          (Math.random() - 0.5) * 0.14,
+        ),
+      );
+      const maxLife = 0.65 + Math.random() * 0.45;
+      this._particles.push({
+        mesh, vel, life: maxLife, maxLife,
+        isSmoke: true,
+        baseOpacity,
+        grow: 0.9 + Math.random() * 0.8,
+      });
+    }
+  }
+
   /** Call every frame. @param {number} delta — seconds since last frame */
   update(delta) {
     for (let i = this._particles.length - 1; i >= 0; i--) {
       const p = this._particles[i];
       p.life -= delta;
-      p.vel.y -= 9 * delta;
-      p.mesh.position.addScaledVector(p.vel, delta * 0.6);
-      p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
+      p.vel.y -= (p.isSmoke ? 0.9 : 9) * delta;
+      p.mesh.position.addScaledVector(p.vel, delta * (p.isSmoke ? 0.75 : 0.6));
+
+      if (p.isSmoke) {
+        const t = 1 - p.life / p.maxLife;
+        const scale = 1 + t * (p.grow ?? 1);
+        p.mesh.scale.setScalar(scale);
+        p.mesh.material.opacity = (p.baseOpacity ?? 0.1) * Math.max(0, p.life / p.maxLife);
+      } else {
+        p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
+      }
 
       if (p.life <= 0) {
         this._scene.remove(p.mesh);

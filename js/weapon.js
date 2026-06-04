@@ -159,8 +159,12 @@ const FLASH_OFFSET = {
   sniper:        new THREE.Vector3(0,  0.032, -0.473),
 };
 
-// Rest position of the weapon group in camera space
+// Rest position of the weapon group in camera space (combat — crosshair unchanged)
 const REST_POS = new THREE.Vector3(0.22, -0.28, -0.46);
+
+// Tactical sprint: high-ready on the right, barrel up (viewmodel only)
+const SPRINT_POS = new THREE.Vector3(0.36, -0.04, -0.34);
+const SPRINT_ROT = { x: 1.28, y: 0.08, z: 0.28 };
 
 export class WeaponSystem {
   /**
@@ -194,6 +198,10 @@ export class WeaponSystem {
     this._reloadAnimT  = 0;
     this._reloadAnimOn = false;
     this._hitShake     = 0;   // set each frame by Game via setHitShake()
+    this._sprintBlend  = 0;   // 0 = combat pose, 1 = tactical sprint pose
+    this._walkPhase    = 0;
+    this._sprintPhase  = 0;
+    this._sprintLoopOn = false;
 
     // ── 3-D objects ────────────────────────────────────────
     /** @type {THREE.Group} */  this.group  = null;
@@ -209,6 +217,8 @@ export class WeaponSystem {
     this.onReloadComplete = null;
     /** Called after equip() with the new weapon name. */
     this.onWeaponChanged  = null;
+    /** Called after each shot: (muzzleWorldPos, muzzleWorldDir) => void */
+    this.onMuzzleEffects = null;
 
     this._buildModel(initialKey);
   }
@@ -230,12 +240,9 @@ export class WeaponSystem {
         && nowMs - this._lastShotMs >= this.fireInterval;
   }
 
-  /** True when mag + reserve are empty and the click-interval has elapsed. */
-  isEmptyClickReady(nowMs) {
-    return this.ammo <= 0
-        && this.reserve === 0
-        && !this.reloading
-        && nowMs - this._lastShotMs >= this.fireInterval;
+  /** True when dry-fire click should play (no fire-rate gate). */
+  isEmpty() {
+    return this.ammo <= 0 && this.reserve === 0 && !this.reloading;
   }
 
   // ── Actions ────────────────────────────────────────────────
@@ -261,12 +268,12 @@ export class WeaponSystem {
 
     sound.playShoot(this.key, { isADS: this.isADS });
     this._showFlash();
+    this._emitMuzzleEffects();
     this.onAmmoChanged?.();
   }
 
-  /** Dry-fire click (rate-limited by fireInterval). */
-  clickEmpty(nowMs) {
-    this._lastShotMs = nowMs;
+  /** Dry-fire click — always audible per trigger attempt (not gated by fire rate). */
+  clickEmpty() {
     sound.play('empty_click', { volume: 0.6 });
   }
 
@@ -277,7 +284,7 @@ export class WeaponSystem {
     this._reloadAnimOn = true;
 
     this.onReloadStart?.();
-    sound.play('reload', { volume: 0.8 });
+    sound.playReload(this.key, { volume: 0.8 });
 
     this._reloadTimer = setTimeout(() => {
       const taken   = Math.min(this.def.magSize - this.ammo, this.reserve);
@@ -301,6 +308,9 @@ export class WeaponSystem {
     this.reloading     = false;
     this._reloadAnimOn = false;
     this.setADS(false);
+    sound.stopTacticalSprintLoop();
+    this._sprintLoopOn = false;
+    this._sprintBlend  = 0;
 
     this._buildModel(key);
     this.onReloadComplete?.();   // ensures reload bar is hidden
@@ -321,11 +331,12 @@ export class WeaponSystem {
   // ── Per-frame update ───────────────────────────────────────
 
   /**
-   * @param {number}  delta    — seconds since last frame
-   * @param {boolean} moving   — player is moving (drives head-bob speed)
-   * @param {boolean} isFiring — mouse is held; suppresses camera pitch recovery
+   * @param {number}  delta      — seconds since last frame
+   * @param {boolean} moving     — player is moving
+   * @param {boolean} isFiring   — mouse held / spraying
+   * @param {boolean} sprinting  — tactical sprint (Shift + move)
    */
-  update(delta, moving, isFiring) {
+  update(delta, moving, isFiring, sprinting = false) {
     // FOV lerp (ADS)
     if (Math.abs(this._camera.fov - this.targetFov) > 0.3) {
       this._camera.fov = THREE.MathUtils.lerp(this._camera.fov, this.targetFov, 0.18);
@@ -345,11 +356,42 @@ export class WeaponSystem {
       this._sprayRecoil = Math.max(0, this._sprayRecoil - recover);
     }
 
-    // Head bob
+    const inCombatPose = isFiring || this.isADS || this._reloadAnimOn;
+
+    // Tactical sprint pose (viewmodel — does not move camera / crosshair)
+    const wantSprint = sprinting && moving && !inCombatPose;
+    if (wantSprint) {
+      this._sprintBlend = Math.min(1, this._sprintBlend + delta * 9);
+    } else {
+      this._sprintBlend = Math.max(0, this._sprintBlend - delta * 12);
+    }
+
+    if (this._sprintBlend > 0.15 && !this._sprintLoopOn) {
+      sound.startTacticalSprintLoop();
+      this._sprintLoopOn = true;
+    } else if (this._sprintBlend < 0.08 && this._sprintLoopOn) {
+      sound.stopTacticalSprintLoop();
+      this._sprintLoopOn = false;
+    }
+
+    this._sprintPhase += delta * 11;
+    const shake = this._sprintBlend * 0.014;
+    const shX   = Math.sin(this._sprintPhase * 1.3) * shake;
+    const shY   = Math.sin(this._sprintPhase * 1.7) * shake;
+    const shZ   = Math.cos(this._sprintPhase * 1.1) * shake * 0.6;
+
+    // Head bob (combat)
     this._bobPhase += delta * (moving ? 7.5 : 2.0);
     const bobAmt = moving ? 1 : 0.3;
-    const bobX   = Math.sin(this._bobPhase)         * 0.010 * bobAmt;
+    const bobX   = Math.sin(this._bobPhase) * 0.010 * bobAmt;
     const bobY   = Math.abs(Math.cos(this._bobPhase * 0.5)) * 0.007 * bobAmt;
+
+    // Walk-only gun bob on Y (combat pose, not sprinting)
+    let walkGunY = 0;
+    if (moving && this._sprintBlend < 0.2 && !inCombatPose) {
+      this._walkPhase += delta * 5.8;
+      walkGunY = Math.sin(this._walkPhase) * 0.032;
+    }
 
     // Reload animation (sinusoidal drop + tilt, peaks at mid-reload)
     let reloadDrop = 0, reloadTilt = 0;
@@ -360,15 +402,24 @@ export class WeaponSystem {
       reloadTilt = Math.sin(t * Math.PI) * 0.45;
     }
 
-    // Apply transforms
+    const sb = this._sprintBlend;
+    const cx = REST_POS.x + bobX;
+    const cy = REST_POS.y - bobY - reloadDrop + walkGunY;
+    const cz = REST_POS.z - this._recoilZ;
+
     if (this.group) {
       this.group.position.set(
-        REST_POS.x + bobX,
-        REST_POS.y - bobY - reloadDrop,
-        REST_POS.z - this._recoilZ,
+        THREE.MathUtils.lerp(cx, SPRINT_POS.x + shX, sb),
+        THREE.MathUtils.lerp(cy, SPRINT_POS.y + shY, sb),
+        THREE.MathUtils.lerp(cz, SPRINT_POS.z + shZ, sb),
       );
-      this.group.rotation.x = this._recoilRotX;  // positive = barrel kicks up
-      this.group.rotation.z = reloadTilt;
+      this.group.rotation.x = THREE.MathUtils.lerp(
+        this._recoilRotX,
+        SPRINT_ROT.x + shY * 2,
+        sb,
+      );
+      this.group.rotation.y = THREE.MathUtils.lerp(0, SPRINT_ROT.y, sb);
+      this.group.rotation.z = THREE.MathUtils.lerp(reloadTilt, SPRINT_ROT.z + shX * 3, sb);
     }
   }
 
@@ -420,14 +471,7 @@ export class WeaponSystem {
 
     // Muzzle flash positioned at the bore axis tip for this weapon
     const flashPos = FLASH_OFFSET[key] ?? FLASH_OFFSET.assault_rifle;
-    this._flash = new THREE.Group();
-    this._flash.add(
-      new THREE.Mesh(
-        new THREE.SphereGeometry(0.05, 6, 6),
-        new THREE.MeshBasicMaterial({ color: 0xffdd44 }),
-      ),
-      new THREE.PointLight(0xffaa00, 4, 2.5),
-    );
+    this._flash = this._buildMuzzleFlash();
     this._flash.position.copy(flashPos);
     this._flash.visible = false;
     group.add(this._flash);
@@ -437,9 +481,56 @@ export class WeaponSystem {
     this.group = group;
   }
 
+  _buildMuzzleFlash() {
+    const g = new THREE.Group();
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xffffee, transparent: true, opacity: 1, depthWrite: false,
+    });
+    const hotMat = new THREE.MeshBasicMaterial({
+      color: 0xffaa33, transparent: true, opacity: 0.95, depthWrite: false,
+    });
+    const flareMat = new THREE.MeshBasicMaterial({
+      color: 0xff6600, transparent: true, opacity: 0.75, depthWrite: false,
+    });
+
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.018, 0.04), coreMat));
+
+    const petals = [
+      [0.055, 0.012, 0.008, 0, 0, 0],
+      [0.055, 0.012, 0.008, 0, Math.PI / 2, 0],
+      [0.04, 0.008, 0.006, 0, 0, Math.PI / 4],
+      [0.04, 0.008, 0.006, 0, 0, -Math.PI / 4],
+      [0.032, 0.006, 0.05, Math.PI / 2, 0, 0],
+      [0.028, 0.005, 0.038, 0, Math.PI / 3, Math.PI / 6],
+    ];
+    petals.forEach(([w, h, d, rx, ry, rz]) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), flareMat.clone());
+      m.rotation.set(rx, ry, rz);
+      g.add(m);
+    });
+
+    const side = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.025, 0.012), hotMat);
+    side.rotation.z = Math.PI / 2;
+    g.add(side);
+
+    g.add(new THREE.PointLight(0xff9922, 5, 2.8));
+    return g;
+  }
+
   _showFlash() {
+    if (!this._flash) return;
     this._flash.visible = true;
+    this._flash.rotation.z = Math.random() * Math.PI * 2;
     clearTimeout(this._flashOff);
-    this._flashOff = setTimeout(() => { this._flash.visible = false; }, 55);
+    this._flashOff = setTimeout(() => { this._flash.visible = false; }, 48);
+  }
+
+  _emitMuzzleEffects() {
+    if (!this._flash || !this.onMuzzleEffects) return;
+    const pos = new THREE.Vector3();
+    const dir = new THREE.Vector3(0, 0, -1);
+    this._flash.getWorldPosition(pos);
+    this._flash.getWorldDirection(dir);
+    this.onMuzzleEffects(pos, dir);
   }
 }

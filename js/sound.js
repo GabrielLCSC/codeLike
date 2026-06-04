@@ -10,7 +10,11 @@ const SOUND_FILES = {
   sg_shoot:      'sounds/weapons/sg_shoot.mp3',
   sn_shoot:      'sounds/weapons/sn_shoot.mp3',
   reload:        'sounds/weapons/reload.mp3',
+  reload_ar:     'sounds/weapons/reload_ar.mp3',
+  reload_sg:     'sounds/weapons/reload_sg.mp3',
+  reload_sn:     'sounds/weapons/reload_sn.mp3',
   empty_click:   'sounds/weapons/empty_click.mp3',
+  tactical_sprint: 'sounds/weapons/tactical_sprint.mp3',
 
   // ── Player ───────────────────────────────────────────────
   hurt:          'sounds/player/hurt.mp3',
@@ -32,6 +36,14 @@ const SOUND_FILES = {
   ui_hover:      'sounds/ui/ui_hover.mp3',
   ui_click:      'sounds/ui/ui_click.mp3',
   kill_confirm:  'sounds/ui/kill_confirm.mp3',
+
+  // ── Kill voice lines — drop in sounds/voice/ (kill_1 … kill_6) ─
+  kill_voice_1:  'sounds/voice/kill_1.mp3',
+  kill_voice_2:  'sounds/voice/kill_2.mp3',
+  kill_voice_3:  'sounds/voice/kill_3.mp3',
+  kill_voice_4:  'sounds/voice/kill_4.mp3',
+  kill_voice_5:  'sounds/voice/kill_5.mp3',
+  kill_voice_6:  'sounds/voice/kill_6.mp3',
 
   // ── Medal achievements — drop files in sounds/medals/ ────
   medal_3:       'sounds/medals/medal_3.mp3',
@@ -75,8 +87,9 @@ class SoundManager {
     this._footstepKeys     = [];   // populated after load — all available variants
     this._lastFootstepIdx  = -1;   // index of last played variant
 
-    // Positional audio: listener is the camera
-    this._listener = null;
+    this._loopSources = new Map();
+    this._killVoiceIdx = 0;
+    this._killVoiceKeys = [];
   }
 
   // ─── INIT (call once after first user gesture) ────────────
@@ -297,7 +310,51 @@ class SoundManager {
     await Promise.all(entries.map(([key, path]) => this._load(key, path)));
     const loaded = this._buffers.size;
     this._footstepKeys = []; // reset so playFootstep rebuilds from loaded buffers
+    this._killVoiceKeys = [
+      'kill_voice_1', 'kill_voice_2', 'kill_voice_3',
+      'kill_voice_4', 'kill_voice_5', 'kill_voice_6',
+    ].filter(k => this._buffers.has(k));
     console.log(`[Sound] ${loaded}/${entries.length} sounds loaded.`);
+  }
+
+  /** Per-weapon reload SFX (falls back to generic reload). */
+  playReload(weaponKey, { volume = 0.8 } = {}) {
+    const map = {
+      assault_rifle: 'reload_ar',
+      shotgun:       'reload_sg',
+      sniper:        'reload_sn',
+    };
+    const key = map[weaponKey] ?? 'reload';
+    if (!this._buffers.has(key)) this.play('reload', { volume });
+    else this.play(key, { volume });
+  }
+
+  /**
+   * Occasional kill voice line — not every kill; rotates through loaded clips.
+   * @param {number} [chance=0.38] — 0–1 probability per kill
+   */
+  playKillVoice(chance = 0.38, delayMs = 0) {
+    if (this._killVoiceKeys.length === 0 || Math.random() > chance) return;
+    const playLine = () => {
+      const key = this._killVoiceKeys[this._killVoiceIdx % this._killVoiceKeys.length];
+      this._killVoiceIdx++;
+      this.play(key, { volume: 0.85, pitch: 0.95 + Math.random() * 0.1 });
+    };
+    if (delayMs > 0) setTimeout(playLine, delayMs);
+    else playLine();
+  }
+
+  /** Low loop while weapon is in tactical sprint pose (viewmodel only). */
+  startTacticalSprintLoop() {
+    if (this._loopSources.has('tactical_sprint')) return;
+    const src = this.play('tactical_sprint', { volume: 0.22, loop: true });
+    if (src) this._loopSources.set('tactical_sprint', src);
+  }
+
+  stopTacticalSprintLoop() {
+    const src = this._loopSources.get('tactical_sprint');
+    if (src) { try { src.stop(); } catch {} }
+    this._loopSources.delete('tactical_sprint');
   }
 
   async _load(key, path) {

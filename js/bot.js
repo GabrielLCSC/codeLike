@@ -39,10 +39,11 @@ export class Bot {
    * @param {function(string,THREE.Vector3,object):void} [onSound]
    *        Spatial sound callback: (soundKey, worldPos, opts) => void
    */
-  constructor(scene, spawnPos, map, index = 0, cfg = DEFAULT_CFG, onSound = null) {
+  constructor(scene, spawnPos, map, index = 0, cfg = DEFAULT_CFG, onSound = null, spawnSlot = 0) {
     this.scene    = scene;
     this.map      = map;
     this.spawnPos = { ...spawnPos };
+    this.spawnSlot = spawnSlot;
     this.index    = index;
     this.cfg      = { ...DEFAULT_CFG, ...cfg };
     this._onSound = onSound;
