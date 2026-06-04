@@ -12,7 +12,7 @@ import {
   updateCharacterAnimation,
   resetCharacterPose,
   triggerCharacterRecoil,
-  billboardCharacterLabels,
+  updateCharacterOverheadUI,
   botStateToPose,
 } from './character.js';
 
@@ -430,13 +430,11 @@ export class Bot {
   }
 
   /** Call each frame to keep health bar and name label facing the camera. */
-  updateHealthBar(camera) {
+  updateHealthBar(camera, map) {
     if (!this.alive) return;
-    billboardCharacterLabels(
-      this.mesh,
-      camera,
-      this._healthBar,
-      Math.max(0, this.health / this.maxHealth),
-    );
+    updateCharacterOverheadUI(this.mesh, camera, map, {
+      healthBar: this._healthBar,
+      healthRatio: this.health / this.maxHealth,
+    });
   }
 }

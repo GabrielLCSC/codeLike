@@ -22,7 +22,7 @@ import { ParticleSystem } from './particles.js';
 import {
   buildCharacterMesh,
   updateCharacterAnimation,
-  billboardCharacterLabels,
+  updateCharacterOverheadUI,
 } from './character.js';
 
 export class Game {
@@ -366,12 +366,13 @@ export class Game {
           }
         }
       } else {
-        const { mesh, rig } = this._buildRemotePlayerMesh(data.name ?? 'Player');
+        const { mesh, rig, healthBar } = this._buildRemotePlayerMesh(data.name ?? 'Player');
         mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
           mesh,
           rig,
+          healthBar,
           data,
           targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
@@ -560,6 +561,7 @@ export class Game {
 
   /** Headshot uses world-space Y (nested limb local Y is unreliable). */
   _isHeadHit(hitObject) {
+    if (hitObject.userData?.ignoreRaycast) return false;
     if (hitObject.material?.depthTest === false) return false;
     hitObject.getWorldPosition(this._hitWorldPos);
     return this._hitWorldPos.y > 1.52;
@@ -581,6 +583,7 @@ export class Game {
     const botHits    = this.raycaster.intersectObjects(botEntries.map(e => e.mesh), true);
     for (const hit of botHits) {
       if (hit.distance >= wallDist) break;
+      if (hit.object.userData?.ignoreRaycast) continue;
       if (hit.object.material?.depthTest === false) continue;
       const entry = this._resolveCharacterHit(hit.object, botEntries);
       if (!entry?.ref?.alive) continue;
@@ -609,6 +612,7 @@ export class Game {
       const rHits = this.raycaster.intersectObjects(rpEntries.map(e => e.mesh), true);
       for (const hit of rHits) {
         if (hit.distance >= wallDist) break;
+        if (hit.object.userData?.ignoreRaycast) continue;
         if (hit.object.material?.depthTest === false) continue;
         const entry = this._resolveCharacterHit(hit.object, rpEntries);
         if (!entry) continue;
@@ -734,7 +738,7 @@ export class Game {
   _updateBots(delta, nowMs) {
     this.bots.forEach(bot => {
       bot.update(delta, nowMs, this.camera.position, (dmg, name) => this.takeDamage(dmg, name));
-      bot.updateHealthBar(this.camera);
+      bot.updateHealthBar(this.camera, this.map);
     });
   }
 
@@ -748,7 +752,13 @@ export class Game {
       if (rp.rig && rp.prevPos) {
         this._animateRemotePlayer(rp, delta);
       }
-      billboardCharacterLabels(rp.mesh, this.camera);
+      const maxHp = 100;
+      const hp = rp.data.health ?? maxHp;
+      updateCharacterOverheadUI(rp.mesh, this.camera, this.map, {
+        healthBar: rp.healthBar,
+        healthRatio: Math.max(0, hp / maxHp),
+        visible: (rp.data.alive ?? true) && hp > 0,
+      });
     });
   }
 
@@ -891,12 +901,12 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _buildRemotePlayerMesh(playerName = 'Player') {
-    const { mesh, rig } = buildCharacterMesh({
+    const { mesh, rig, healthBar } = buildCharacterMesh({
       team: 'ally',
       name: playerName,
-      showHealthBar: false,
+      showHealthBar: true,
     });
-    return { mesh, rig };
+    return { mesh, rig, healthBar };
   }
 
   /** Flat body mesh. @param {THREE.Vector3} pos @param {number} rotY @param {number} color */

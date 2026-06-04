@@ -206,33 +206,52 @@ export function buildCharacterMesh({ team = 'enemy', name = 'Soldier', showHealt
   nc.shadowColor = 'rgba(0,0,0,0.85)';
   nc.shadowBlur = 6;
   nc.fillText(name, 128, 34);
+  const labelMat = {
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  };
+
+  const overhead = new THREE.Group();
+  overhead.name = 'overheadUi';
+  overhead.userData.isOverheadUi = true;
+  overhead.position.y = 2.2;
+  root.add(overhead);
+
   const nameSprite = new THREE.Mesh(
     new THREE.PlaneGeometry(1.05, 0.20),
     new THREE.MeshBasicMaterial({
       map: new THREE.CanvasTexture(nameCanvas),
-      transparent: true, depthTest: false, side: THREE.DoubleSide,
+      ...labelMat,
     }),
   );
   nameSprite.name = 'nameSprite';
-  nameSprite.position.y = 2.35;
-  root.add(nameSprite);
+  nameSprite.userData.ignoreRaycast = true;
+  nameSprite.position.y = 0.15;
+  overhead.add(nameSprite);
 
   // ── Health bar ───────────────────────────────────────────
   let healthBar = null;
+  let barBg = null;
   if (showHealthBar) {
-    const barBg = new THREE.Mesh(
+    barBg = new THREE.Mesh(
       new THREE.PlaneGeometry(0.52, 0.06),
-      new THREE.MeshBasicMaterial({ color: palette.barBg, depthTest: false }),
+      new THREE.MeshBasicMaterial({ color: palette.barBg, ...labelMat }),
     );
-    barBg.position.y = 2.15;
-    root.add(barBg);
+    barBg.name = 'healthBarBg';
+    barBg.userData.ignoreRaycast = true;
+    barBg.position.y = -0.05;
+    overhead.add(barBg);
 
     healthBar = new THREE.Mesh(
       new THREE.PlaneGeometry(0.52, 0.06),
-      new THREE.MeshBasicMaterial({ color: palette.labelColor, depthTest: false }),
+      new THREE.MeshBasicMaterial({ color: palette.labelColor, ...labelMat }),
     );
-    healthBar.position.set(0, 2.15, 0.002);
-    root.add(healthBar);
+    healthBar.name = 'healthBarFill';
+    healthBar.userData.ignoreRaycast = true;
+    healthBar.position.set(0, -0.05, 0.002);
+    overhead.add(healthBar);
   }
 
   const rig = {
@@ -249,7 +268,7 @@ export function buildCharacterMesh({ team = 'enemy', name = 'Soldier', showHealt
   };
 
   root.userData.isCharacter = true;
-  return { mesh: root, rig, healthBar, mats };
+  return { mesh: root, rig, healthBar, barBg, overhead, mats };
 }
 
 /**
@@ -379,15 +398,60 @@ export function triggerCharacterRecoil(rig) {
   if (rig) rig.recoilT = 1;
 }
 
-/** Billboard name/health sprites toward the camera. */
-export function billboardCharacterLabels(mesh, camera, healthBar, healthRatio = 1) {
-  mesh.traverse(c => {
-    if (c.isMesh && c.material?.depthTest === false) c.lookAt(camera.position);
-  });
-  if (healthBar) {
-    healthBar.scale.x = Math.max(0, healthRatio);
-    healthBar.position.x = (healthRatio - 1) * 0.26;
+/** Max distance (world units) at which name/health overhead UI is shown. */
+export const OVERHEAD_LABEL_MAX_DIST = 26;
+/** Min distance — avoids huge labels when standing on top of someone. */
+export const OVERHEAD_LABEL_MIN_DIST = 2;
+/** Reference distance for constant on-screen label size (scale ∝ dist / ref). */
+export const OVERHEAD_LABEL_REF_DIST = 7;
+
+const _overheadAnchor = new THREE.Vector3();
+
+/**
+ * Billboard name/health UI: LOS + distance gate, depth-tested (no wall x-ray),
+ * constant apparent size regardless of distance.
+ * @param {THREE.Object3D} mesh
+ * @param {THREE.Camera} camera
+ * @param {{ hasLOS: (x1,z1,x2,z2)=>boolean }|null} map
+ * @param {{ healthBar?: THREE.Mesh, healthRatio?: number, visible?: boolean }} [opts]
+ */
+export function updateCharacterOverheadUI(mesh, camera, map, opts = {}) {
+  const overhead = mesh.getObjectByName('overheadUi');
+  if (!overhead) return;
+
+  const { healthBar, healthRatio = 1, visible: forceVisible = true } = opts;
+  if (!forceVisible) {
+    overhead.visible = false;
+    return;
   }
+
+  overhead.getWorldPosition(_overheadAnchor);
+  const dist = camera.position.distanceTo(_overheadAnchor);
+  const inRange = dist >= OVERHEAD_LABEL_MIN_DIST && dist <= OVERHEAD_LABEL_MAX_DIST;
+  const hasLOS = !map || map.hasLOS(
+    camera.position.x,
+    camera.position.z,
+    _overheadAnchor.x,
+    _overheadAnchor.z,
+  );
+  const show = inRange && hasLOS;
+  overhead.visible = show;
+  if (!show) return;
+
+  overhead.lookAt(camera.position);
+  const sizeScale = dist / OVERHEAD_LABEL_REF_DIST;
+  overhead.scale.setScalar(sizeScale);
+
+  if (healthBar) {
+    const ratio = Math.max(0, Math.min(1, healthRatio));
+    healthBar.scale.x = ratio;
+    healthBar.position.x = (ratio - 1) * 0.26;
+  }
+}
+
+/** @deprecated Use updateCharacterOverheadUI */
+export function billboardCharacterLabels(mesh, camera, healthBar, healthRatio = 1) {
+  updateCharacterOverheadUI(mesh, camera, null, { healthBar, healthRatio });
 }
 
 /** Map bot AI state → animation pose. */
