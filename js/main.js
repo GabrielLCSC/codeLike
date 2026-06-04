@@ -152,9 +152,24 @@ document.addEventListener('DOMContentLoaded', () => {
   applySettingsToUI();
   setupGunCards();
 
-  // UI sound helper — init AudioContext on first menu click
-  function uiClick() { sound.init(); sound.play('ui_click', { volume: 0.5 }); }
-  function uiHover() { sound.play('ui_hover', { volume: 0.25 }); }
+  // Pre-load SFX; unlock AudioContext on first pointer/key (browser policy)
+  const soundReady = sound.init();
+  const unlockAudio = () => { sound.ensureUnlocked(); };
+  document.body.addEventListener('pointerdown', unlockAudio, { once: true, capture: true });
+  document.body.addEventListener('keydown', unlockAudio, { once: true, capture: true });
+  const menu = document.getElementById('menu-overlay');
+  if (menu) menu.addEventListener('mouseenter', unlockAudio, { once: true, capture: true });
+
+  function uiClick() {
+    soundReady.then(() => sound.ensureUnlocked()).then(() => {
+      sound.play('ui_click', { volume: 0.5 });
+    });
+  }
+  function uiHover() {
+    soundReady.then(() => sound.ensureUnlocked()).then(() => {
+      sound.play('ui_hover', { volume: 0.25 });
+    });
+  }
   document.querySelectorAll('.menu-btn, .confirm-btn, .back-btn').forEach(btn => {
     btn.addEventListener('click',      uiClick);
     btn.addEventListener('mouseenter', uiHover);

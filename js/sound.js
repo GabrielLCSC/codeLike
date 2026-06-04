@@ -14,7 +14,8 @@ const SOUND_FILES = {
   reload_sg:     'sounds/weapons/reload_sg.mp3',
   reload_sn:     'sounds/weapons/reload_sn.mp3',
   empty_click:   'sounds/weapons/empty_click.mp3',
-  tactical_sprint: 'sounds/weapons/tactical_sprint.mp3',
+  tactical_sprint:  'sounds/weapons/tactical_sprint.mp3',   // step 1
+  tactical_sprint2: 'sounds/weapons/tactical_sprint2.mp3', // step 2
 
   // ── Player ───────────────────────────────────────────────
   hurt:          'sounds/player/hurt.mp3',
@@ -86,6 +87,9 @@ class SoundManager {
     this._footstepInterval = 0.38; // seconds between steps
     this._footstepKeys     = [];   // populated after load — all available variants
     this._lastFootstepIdx  = -1;   // index of last played variant
+    this._lastTacticalStep  = 0;
+    this._tacticalStepKeys = [];
+    this._tacticalStepIdx = 0;
 
     this._loopSources = new Map();
     this._killVoiceIdx = 0;
@@ -110,6 +114,14 @@ class SoundManager {
       await this._loadAll();
     } catch (e) {
       console.warn('[Sound] AudioContext unavailable:', e.message);
+    }
+  }
+
+  /** Load buffers and resume AudioContext (needed before first menu SFX). */
+  async ensureUnlocked() {
+    await this.init();
+    if (this._ctx?.state === 'suspended') {
+      try { await this._ctx.resume(); } catch {}
     }
   }
 
@@ -184,6 +196,30 @@ class SoundManager {
     this._lastFootstepIdx = idx;
 
     this.play(this._footstepKeys[idx], { volume: 0.20, pitch: 0.9 + Math.random() * 0.2 });
+  }
+
+  /**
+   * Tactical sprint gear rustle — alternates step 1 / step 2 at sprint footstep cadence.
+   * Drop tactical_sprint.mp3 + tactical_sprint2.mp3 in sounds/weapons/.
+   */
+  playTacticalSprintStep(nowSec) {
+    const interval = 0.23;
+    if (nowSec - this._lastTacticalStep < interval) return;
+    this._lastTacticalStep = nowSec;
+
+    if (this._tacticalStepKeys.length === 0) {
+      const all = ['tactical_sprint', 'tactical_sprint2'];
+      this._tacticalStepKeys = all.filter(k => this._buffers.has(k));
+    }
+    if (this._tacticalStepKeys.length === 0) return;
+
+    const key = this._tacticalStepKeys[this._tacticalStepIdx % this._tacticalStepKeys.length];
+    this._tacticalStepIdx = (this._tacticalStepIdx + 1) % this._tacticalStepKeys.length;
+
+    this.play(key, {
+      volume: 0.01,
+      pitch:  0.88 + Math.random() * 0.24,
+    });
   }
 
   /**
@@ -310,6 +346,8 @@ class SoundManager {
     await Promise.all(entries.map(([key, path]) => this._load(key, path)));
     const loaded = this._buffers.size;
     this._footstepKeys = []; // reset so playFootstep rebuilds from loaded buffers
+    this._tacticalStepKeys = [];
+    this._tacticalStepIdx = 0;
     this._killVoiceKeys = [
       'kill_voice_1', 'kill_voice_2', 'kill_voice_3',
       'kill_voice_4', 'kill_voice_5', 'kill_voice_6',
@@ -344,18 +382,8 @@ class SoundManager {
     else playLine();
   }
 
-  /** Low loop while weapon is in tactical sprint pose (viewmodel only). */
-  startTacticalSprintLoop() {
-    if (this._loopSources.has('tactical_sprint')) return;
-    const src = this.play('tactical_sprint', { volume: 0.22, loop: true });
-    if (src) this._loopSources.set('tactical_sprint', src);
-  }
-
-  stopTacticalSprintLoop() {
-    const src = this._loopSources.get('tactical_sprint');
-    if (src) { try { src.stop(); } catch {} }
-    this._loopSources.delete('tactical_sprint');
-  }
+  /** No-op (legacy); tactical sprint uses playTacticalSprintStep. */
+  stopTacticalSprintLoop() {}
 
   async _load(key, path) {
     // Try the listed extension first, then the two common alternatives.

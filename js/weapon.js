@@ -201,7 +201,6 @@ export class WeaponSystem {
     this._sprintBlend  = 0;   // 0 = combat pose, 1 = tactical sprint pose
     this._walkPhase    = 0;
     this._sprintPhase  = 0;
-    this._sprintLoopOn = false;
 
     // ── 3-D objects ────────────────────────────────────────
     /** @type {THREE.Group} */  this.group  = null;
@@ -308,8 +307,6 @@ export class WeaponSystem {
     this.reloading     = false;
     this._reloadAnimOn = false;
     this.setADS(false);
-    sound.stopTacticalSprintLoop();
-    this._sprintLoopOn = false;
     this._sprintBlend  = 0;
 
     this._buildModel(key);
@@ -327,6 +324,9 @@ export class WeaponSystem {
 
   /** Game must call this each frame so weapon can widen spread when player is hit. */
   setHitShake(s) { this._hitShake = s; }
+
+  /** True when the viewmodel is in tactical high-ready sprint pose. */
+  get isTacticalSprint() { return this._sprintBlend > 0.5; }
 
   // ── Per-frame update ───────────────────────────────────────
 
@@ -364,14 +364,6 @@ export class WeaponSystem {
       this._sprintBlend = Math.min(1, this._sprintBlend + delta * 9);
     } else {
       this._sprintBlend = Math.max(0, this._sprintBlend - delta * 12);
-    }
-
-    if (this._sprintBlend > 0.15 && !this._sprintLoopOn) {
-      sound.startTacticalSprintLoop();
-      this._sprintLoopOn = true;
-    } else if (this._sprintBlend < 0.08 && this._sprintLoopOn) {
-      sound.stopTacticalSprintLoop();
-      this._sprintLoopOn = false;
     }
 
     this._sprintPhase += delta * 11;

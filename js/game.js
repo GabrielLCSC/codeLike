@@ -486,7 +486,11 @@ export class Game {
         this._airVelX = fwdVec.x * fwd * spd + rgtVec.x * rgt * spd;
         this._airVelZ = fwdVec.z * fwd * spd + rgtVec.z * rgt * spd;
         this.isMoving = true;
-        sound.playFootstep(performance.now() / 1000, sprint);
+        const stepT = performance.now() / 1000;
+        sound.playFootstep(stepT, sprint);
+        if (sprint && this.weapon.isTacticalSprint) {
+          sound.playTacticalSprintStep(stepT);
+        }
       } else {
         this._airVelX = 0;
         this._airVelZ = 0;
