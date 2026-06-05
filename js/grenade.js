@@ -117,7 +117,7 @@ export class GrenadeSystem {
     return true;
   }
 
-  /** E up — throw; fuse keeps counting from unpin. Longer hold = farther throw. */
+  /** E up — throw; full fuse starts on release (hold E only affects range + in-hand cook). */
   releaseThrow() {
     if (!this._primed) return;
 
@@ -137,7 +137,11 @@ export class GrenadeSystem {
     _throwVel.y += lift;
     _throwVel.addScaledVector(_right, 0.4 + charge * 0.35);
 
-    this._spawnWorldGrenade(pos, _throwVel, { broadcast: true, charge });
+    this._spawnWorldGrenade(pos, _throwVel, {
+      broadcast: true,
+      charge,
+      fuse: GRENADE_FUSE_S,
+    });
     this._endPrimeConsume();
   }
 
@@ -157,7 +161,11 @@ export class GrenadeSystem {
 
     for (let i = this._active.length - 1; i >= 0; i--) {
       const g = this._active[i];
-      g.fuse -= delta;
+      if (g.skipTick) {
+        g.skipTick = false;
+      } else {
+        g.fuse -= delta;
+      }
       g.vel.y -= GRENADE_GRAVITY * delta;
       g.pos.addScaledVector(g.vel, delta);
 
@@ -204,7 +212,7 @@ export class GrenadeSystem {
     if (pin) pin.rotation.z = Math.min(Math.PI * 0.55, t * 0.35);
   }
 
-  _spawnWorldGrenade(pos, vel, { broadcast = false, charge = 0 } = {}) {
+  _spawnWorldGrenade(pos, vel, { broadcast = false, charge = 0, fuse = null } = {}) {
     const mesh = makeGrenadeMesh();
     mesh.scale.setScalar(1.35);
     mesh.position.copy(pos);
@@ -213,7 +221,8 @@ export class GrenadeSystem {
       mesh,
       pos: pos.clone(),
       vel: vel.clone(),
-      fuse: this._fuseLeft,
+      fuse: fuse ?? this._fuseLeft,
+      skipTick: true,
     };
     this._active.push(entry);
 
@@ -221,7 +230,7 @@ export class GrenadeSystem {
       this._hooks.broadcastThrow({
         x: pos.x, y: pos.y, z: pos.z,
         vx: vel.x, vy: vel.y, vz: vel.z,
-        fuse: this._fuseLeft,
+        fuse: entry.fuse,
         charge,
       });
     }
@@ -231,7 +240,10 @@ export class GrenadeSystem {
   spawnRemoteThrow(data) {
     const pos = new THREE.Vector3(data.x, data.y ?? 0.12, data.z);
     const vel = new THREE.Vector3(data.vx, data.vy, data.vz);
-    this._spawnWorldGrenade(pos, vel, { broadcast: false });
+    this._spawnWorldGrenade(pos, vel, {
+      broadcast: false,
+      fuse: data.fuse ?? GRENADE_FUSE_S,
+    });
   }
 
   /** Explosion from network (VFX + damage for non-thrower clients). */

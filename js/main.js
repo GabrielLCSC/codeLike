@@ -12,6 +12,7 @@ import { MAP_CATALOG, getMapGameplay } from './maps/index.js';
 const DEFAULTS = {
   sensitivity: 2.0,
   fov:         75,
+  volume:      1.0,
   weapon:      'assault_rifle',
   adsMode:     'toggle',   // 'toggle' | 'hold'
   botCount:    3,
@@ -51,8 +52,11 @@ function syncUsernameFromAuth() {
 function applySettingsToUI() {
   document.getElementById('inp-sens').value     = settings.sensitivity;
   document.getElementById('inp-fov').value      = settings.fov;
+  document.getElementById('inp-volume').value   = settings.volume;
   document.getElementById('lbl-sens').textContent = Number(settings.sensitivity).toFixed(1);
   document.getElementById('lbl-fov').textContent  = settings.fov;
+  document.getElementById('lbl-volume').textContent = Math.round(settings.volume * 100);
+  sound.setVolume(settings.volume);
   // ADS mode buttons
   document.getElementById('ads-toggle-btn').classList.toggle('active', settings.adsMode === 'toggle');
   document.getElementById('ads-hold-btn').classList.toggle('active', settings.adsMode === 'hold');
@@ -531,6 +535,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btn.disabled) return;
     btn.disabled = true;
     btn.textContent = 'LEAVING…';
+    await sound.fadeOutMatchEnd(3);
     void exitToMenu();
   });
 
@@ -593,6 +598,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('inp-fov').addEventListener('input', function () {
     document.getElementById('lbl-fov').textContent = this.value;
   });
+  document.getElementById('inp-volume').addEventListener('input', function () {
+    document.getElementById('lbl-volume').textContent = Math.round(parseFloat(this.value) * 100);
+    sound.setVolume(parseFloat(this.value));
+  });
 
   // ADS mode toggle
   document.getElementById('ads-toggle-btn').addEventListener('click', () => {
@@ -607,6 +616,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-save-settings').addEventListener('click', () => {
     settings.sensitivity = parseFloat(document.getElementById('inp-sens').value);
     settings.fov         = parseInt(document.getElementById('inp-fov').value);
+    settings.volume      = parseFloat(document.getElementById('inp-volume').value);
+    sound.setVolume(settings.volume);
     saveSettings(settings);
     showScreen('screen-main');
   });

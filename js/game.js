@@ -173,31 +173,32 @@ export class Game {
     this.mapScanner = new MapScanner(this.map.width, this.map.height, MAP_SCAN_RADIUS);
 
     if (LodibidonController.isMode(this.opts)) {
-      this._initPlayer();
       this._initSystems();
       this.lodibidon = new LodibidonController(this);
       if (this.mp) {
         const me = this.mp.players.get(this.mp.uid);
         if (me?.team) this.lodibidon.playerTeam = me.team;
       }
+      if (this.mp) this._setupMultiplayer();
+      this._initPlayer();
+      if (this.mp) this._bootstrapMultiplayerState();
       this.hud.showLodibidonMode(true);
       this.hud.setLodibidonScore({ alpha: 0, omega: 0 }, 1);
       this._bindInput();
       if (!this._isMpClient()) this._initLodibidonBots();
-      if (this.mp) this._setupMultiplayer();
       if (!this._isMpClient()) {
-        const nowMs = performance.now();
         this.lodibidon.startRound();
         this.mp?.syncMatch(this.lodibidon.buildMatchState());
       }
     } else {
-      this._initPlayerSpawnSlot();
-      this._initPlayer();
       this._initSystems();
       this.classicMatch = new ClassicMatchController(this);
+      if (this.mp) this._setupMultiplayer();
+      this._initPlayerSpawnSlot();
+      this._initPlayer();
+      if (this.mp) this._bootstrapMultiplayerState();
       this._bindInput();
       if ((this.opts.botCount ?? 0) > 0) this._initBots(this.opts.botCount);
-      if (this.mp) this._setupMultiplayer();
       if (!this._isMpClient()) this.classicMatch.start();
     }
 
@@ -307,6 +308,8 @@ export class Game {
       this._placePlayerAt(sp.x, sp.z);
     }
 
+    this._pushLocalSpawnToNetwork();
+
     const plo = document.getElementById('pointer-lock-overlay');
     plo.addEventListener('click', () => {
       if (this._isLodibidonMatchOver() || this._isClassicMatchOver()) return;
@@ -338,7 +341,7 @@ export class Game {
       plo.classList.remove('hidden');
     });
 
-    setTimeout(() => this.controls.lock(), 200);
+    // Pointer lock needs a user gesture — overlay click handles it.
   }
 
   _initSystems() {
@@ -414,8 +417,13 @@ export class Game {
     for (const rp of this.remotePlayers.values()) {
       if (rp.mesh.visible && near(rp.mesh.position.x, rp.mesh.position.z)) n++;
     }
-    for (const p of this.mp?.players.values() ?? []) {
-      if (near(p.x ?? 0, p.z ?? 0)) n++;
+    for (const [uid, p] of this.mp?.players ?? []) {
+      if (uid === this.mp?.uid) continue;
+      const px = p.x ?? 0;
+      const pz = p.z ?? 0;
+      if (px !== 0 || pz !== 0) {
+        if (near(px, pz)) n++;
+      }
     }
     return n;
   }
@@ -451,6 +459,18 @@ export class Game {
 
   _initPlayerSpawnSlot() {
     const half = this._spawnHalf();
+    if (this.mp?.uid) {
+      let h = 0;
+      for (let i = 0; i < this.mp.uid.length; i++) {
+        h = (h * 31 + this.mp.uid.charCodeAt(i)) | 0;
+      }
+      const preferred = ((h % half) + half) % half;
+      if (this._countOccupancyNearSpawn(preferred) === 0) {
+        this._playerSpawnSlot = preferred;
+        this._claimedSpawns.add(preferred);
+        return;
+      }
+    }
     this._playerSpawnSlot = this._claimLeastCrowdedSpawn(0, half);
   }
 
@@ -514,6 +534,14 @@ export class Game {
       }
     }
     this.camera.position.set(x, PLAYER_HEIGHT, z);
+  }
+
+  /** Push spawn position to Firebase immediately so other clients see us. */
+  _pushLocalSpawnToNetwork() {
+    if (!this.mp || !this.mapScanner || !this.camera) return;
+    this.lastSyncMs = 0;
+    this._syncLocalPlayerPosition(performance.now());
+    this.mp.updateHealth(this.health);
   }
 
   _placePlayerAtWithYaw(x, z, lookX, lookZ) {
@@ -959,6 +987,7 @@ export class Game {
     document.getElementById('death-screen')?.classList.add('hidden');
     this.hud?.cancelMedal();
     sound.stopVoiceAndMedals();
+    sound.playClassicMatchEnd();
 
     const rows = this._getLeaderboardRows().rows ?? [];
     const winner = rows[0]?.name ?? '—';
@@ -1464,6 +1493,25 @@ export class Game {
     }
   }
 
+  /** Seed remotes + match state already on the room when we join mid-start. */
+  _bootstrapMultiplayerState() {
+    if (!this.mp) return;
+
+    for (const [uid, data] of this.mp.players) {
+      if (uid === this.mp.uid) continue;
+      this.mp.onPlayerUpdate?.(uid, data);
+    }
+
+    if (this.classicMatch && this.mp.roomRef) {
+      this.mp.roomRef.child('classic').once('value', snap => {
+        const val = snap.val();
+        if (val) this.classicMatch.applyState(val);
+      });
+    }
+
+    this._pushLocalSpawnToNetwork();
+  }
+
   // ═══════════════════════════════════════════════════════
   //  MAIN LOOP
   // ═══════════════════════════════════════════════════════
@@ -1958,6 +2006,7 @@ export class Game {
     this.hud.setScore(this.kills, this.deaths);
     this.hud.hideDeathScreen();
     this.mp?.updateHealth(100);
+    this._pushLocalSpawnToNetwork();
     setTimeout(() => this.controls.lock(), 100);
   }
 

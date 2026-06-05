@@ -391,7 +391,13 @@ class SoundManager {
 
   /** Master volume 0–1 */
   setVolume(v) {
-    if (this._master) this._master.gain.value = Math.max(0, Math.min(1, v));
+    const clamped = Math.max(0, Math.min(1, v));
+    if (this._master) this._master.gain.value = clamped;
+    return clamped;
+  }
+
+  getVolume() {
+    return this._master?.gain.value ?? 1;
   }
 
   /**
@@ -529,6 +535,15 @@ class SoundManager {
 
   /** ~15s match-end music — stops ambiance first. */
   playLodibidonMatchEnd() {
+    this._playMatchEndMusic();
+  }
+
+  /** Classic FFA match-end music (same sting as Lodibidon). */
+  playClassicMatchEnd() {
+    this._playMatchEndMusic();
+  }
+
+  _playMatchEndMusic() {
     this.stopAmbiance();
     this.stopMatchEnd();
     const handle = this._playSfx('lodibidon_match_end', { volume: 0.58 });

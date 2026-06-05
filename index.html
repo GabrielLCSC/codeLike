@@ -124,7 +124,9 @@
         <h2>SELECT LOADOUT</h2>
         <div class="header-rule"></div>
       </div>
-      <div class="gun-grid">
+
+      <div class="loadout-scroll">
+        <div class="gun-grid">
 
         <div class="gun-card" data-gun="assault_rifle">
           <div class="gun-silhouette ar"></div>
@@ -197,7 +199,11 @@
         </div>
       </div>
 
-      <button class="confirm-btn" id="btn-confirm-loadout">CONFIRM LOADOUT →</button>
+      </div>
+
+      <div class="loadout-footer">
+        <button class="confirm-btn" id="btn-confirm-loadout">CONFIRM LOADOUT →</button>
+      </div>
     </div>
 
     <!-- SETTINGS SCREEN -->
@@ -215,6 +221,10 @@
         <div class="setting-group">
           <label class="setting-label">FIELD OF VIEW — <span id="lbl-fov">75</span>°</label>
           <input type="range" id="inp-fov" class="setting-slider" min="60" max="110" step="5" value="75">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">VOLUME — <span id="lbl-volume">100</span>%</label>
+          <input type="range" id="inp-volume" class="setting-slider" min="0" max="1" step="0.05" value="1">
         </div>
         <div class="setting-group">
           <label class="setting-label">AIM (RIGHT CLICK)</label>
