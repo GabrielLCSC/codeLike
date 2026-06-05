@@ -6,6 +6,7 @@ import { Game }               from './game.js';
 import { MultiplayerManager } from './multiplayer.js';
 import { sound }              from './sound.js';
 import { auth }                 from './auth.js';
+import { MAP_CATALOG, getMapGameplay } from './maps/index.js';
 
 // ─── SETTINGS (persisted in localStorage) ───────────────
 const DEFAULTS = {
@@ -17,6 +18,7 @@ const DEFAULTS = {
   botLevel:    'corporal', // 'private' | 'corporal' | 'commando' | 'veteran'
   team:        'alpha',    // lodibidon: 'alpha' | 'omega'
   gameType:    'ffa',      // 'ffa' | 'lodibidon'
+  mapId:       'city',
 };
 
 function loadSettings() {
@@ -75,6 +77,32 @@ function setupGunCards() {
       settings.weapon = card.dataset.gun;
     });
   });
+}
+
+function setupMapCards() {
+  const grid = document.getElementById('map-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  for (const m of MAP_CATALOG) {
+    const card = document.createElement('div');
+    card.className = 'map-card';
+    card.dataset.map = m.id;
+    card.innerHTML =
+      `<h3>${m.name.toUpperCase()}</h3>` +
+      `<p class="map-desc">${m.description}</p>`;
+    if (m.id === settings.mapId) card.classList.add('selected');
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.map-card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      settings.mapId = m.id;
+      saveSettings(settings);
+    });
+    grid.appendChild(card);
+  }
+}
+
+function getMapLabel(mapId) {
+  return getMapGameplay(mapId).meta.name ?? mapId;
 }
 
 // ─── GAME LAUNCHER ───────────────────────────────────────
@@ -196,6 +224,7 @@ function _startGame(mode, mpInstance) {
     mode,
     gameType:  isLodibidon ? 'lodibidon' : 'ffa',
     team:      settings.team,
+    mapId:     mpInstance?.mapId ?? settings.mapId,
     weapon:      settings.weapon,
     sensitivity: settings.sensitivity,
     fov:         settings.fov,
@@ -233,6 +262,7 @@ function setLoadoutForGameType(gameType) {
     });
   }
   setupGunCards();
+  setupMapCards();
   showScreen('screen-loadout');
 }
 
@@ -283,6 +313,7 @@ async function exitToMenu() {
   document.getElementById('menu-overlay').style.display = '';
   document.getElementById('hud').classList.add('hidden');
   document.getElementById('pointer-lock-overlay').classList.add('hidden');
+  document.getElementById('classic-match-over')?.classList.add('hidden');
   document.getElementById('death-screen').classList.add('hidden');
   document.getElementById('scope-overlay').classList.add('hidden');
   document.getElementById('damage-vignette').classList.remove('flash');
@@ -293,6 +324,8 @@ async function exitToMenu() {
 function renderLobby(players) {
   const list = document.getElementById('lobby-player-list');
   const isLod = mp?.gameMode === 'lodibidon';
+  const mapLbl = document.getElementById('lbl-lobby-map');
+  if (mapLbl && mp?.mapId) mapLbl.textContent = getMapLabel(mp.mapId);
   list.innerHTML = '';
   players.forEach((p, i) => {
     const div = document.createElement('div');
@@ -330,6 +363,7 @@ function setLobbyLodibidonUI(isLod) {
 document.addEventListener('DOMContentLoaded', () => {
   applySettingsToUI();
   setupGunCards();
+  setupMapCards();
   setAuthTab('login');
 
   // Pre-load SFX; unlock AudioContext on first pointer/key (browser policy)
@@ -492,6 +526,14 @@ document.addEventListener('DOMContentLoaded', () => {
     void exitToMenu();
   });
 
+  document.getElementById('btn-classic-exit')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = 'LEAVING…';
+    void exitToMenu();
+  });
+
   document.getElementById('btn-settings').addEventListener('click', () => {
     applySettingsToUI();
     showScreen('screen-settings');
@@ -589,6 +631,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const code = await mp.hostRoom(auth.displayName, settings.weapon, {
         gameMode: isLod ? 'lodibidon' : 'ffa',
         team:     isLod ? settings.team : null,
+        mapId:    settings.mapId,
       });
 
       document.getElementById('lbl-room-code').textContent = code;

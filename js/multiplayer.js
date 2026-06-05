@@ -2,7 +2,8 @@
 //  WARFRONT — Firebase Realtime Database multiplayer manager
 // ═══════════════════════════════════════════════════════════
 
-import { FIREBASE_CONFIG, MAX_PLAYERS, PLAYER_HEIGHT } from './config.js';
+import { FIREBASE_CONFIG, MAX_PLAYERS, PLAYER_HEIGHT, CLASSIC_MATCH_TIME_S } from './config.js';
+import { DEFAULT_MAP_ID } from './maps/index.js';
 
 export class MultiplayerManager {
   constructor() {
@@ -35,7 +36,11 @@ export class MultiplayerManager {
     /** @type {(data:object) => void} */
     this.onMatchUpdate   = null;
 
+    /** @type {(data:object) => void} */
+    this.onClassicUpdate = null;
+
     this.gameMode = 'ffa';
+    this.mapId = DEFAULT_MAP_ID;
     this._roomClosedFired = false;
   }
 
@@ -62,11 +67,13 @@ export class MultiplayerManager {
     this.roomCode = code;
     this.isHost   = true;
     this.gameMode = opts.gameMode ?? 'ffa';
+    this.mapId     = opts.mapId ?? DEFAULT_MAP_ID;
 
     const roomData = {
       host:     this.uid,
       status:   'waiting',
       gameMode: this.gameMode,
+      mapId:    this.mapId,
       created:  Date.now(),
       players: {
         [this.uid]: this._playerPayload(username, weapon, true, opts.team ?? null),
@@ -98,6 +105,7 @@ export class MultiplayerManager {
     this.roomCode = code;
     this.isHost   = false;
     this.gameMode = data.gameMode ?? 'ffa';
+    this.mapId    = data.mapId ?? DEFAULT_MAP_ID;
 
     if (this.gameMode === 'lodibidon') {
       const team = opts.team ?? null;
@@ -123,6 +131,14 @@ export class MultiplayerManager {
       this.roomRef.child('world/bots').set({});
       if (this.gameMode === 'lodibidon') {
         this.roomRef.child('match').set(this._defaultMatchState());
+      } else {
+        const now = Date.now();
+        this.roomRef.child('classic').set({
+          phase:            'live',
+          phaseEndsAt:      now + CLASSIC_MATCH_TIME_S * 1000,
+          phaseRemainingMs: CLASSIC_MATCH_TIME_S * 1000,
+          serverNow:        now,
+        });
       }
     }
   }
@@ -150,6 +166,12 @@ export class MultiplayerManager {
   syncMatch(state) {
     if (!this.roomRef || !this.isHost) return;
     this.roomRef.child('match').set(state);
+  }
+
+  /** Host: push classic FFA timer / end state. */
+  syncClassic(state) {
+    if (!this.roomRef || !this.isHost) return;
+    this.roomRef.child('classic').set(state);
   }
 
   // ─── REAL-TIME DATA PUSH ─────────────────────────────
@@ -403,6 +425,16 @@ export class MultiplayerManager {
     this.roomRef.child('match').once('value', snap => {
       const val = snap.val();
       if (val) this.onMatchUpdate?.(val);
+    });
+
+    this.roomRef.child('classic').on('value', snap => {
+      const val = snap.val();
+      if (val) this.onClassicUpdate?.(val);
+    });
+
+    this.roomRef.child('classic').once('value', snap => {
+      const val = snap.val();
+      if (val) this.onClassicUpdate?.(val);
     });
 
     this.roomRef.child('events').on('child_added', snap => {

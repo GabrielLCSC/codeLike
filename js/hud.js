@@ -32,6 +32,9 @@ export class HUD {
     /** @type {ReturnType<typeof setInterval>|null} */
     this._lodQuitTimer = null;
     this._lodMatchOverShown = false;
+    /** @type {ReturnType<typeof setInterval>|null} */
+    this._classicQuitTimer = null;
+    this._classicMatchOverShown = false;
     /** @type {Map<string, { wx:number, wz:number, color:string, t:number }>} */
     this._radarHits  = new Map();
     /** @type {HTMLCanvasElement|null} */
@@ -67,7 +70,11 @@ export class HUD {
     this._radarHits.clear();
   }
 
-  show() { $('hud').classList.remove('hidden'); }
+  show() {
+    this._lodMatchOverShown = false;
+    this._classicMatchOverShown = false;
+    $('hud').classList.remove('hidden');
+  }
   hide() { $('hud').classList.add('hidden'); }
 
   setHealth(hp) {
@@ -467,6 +474,59 @@ export class HUD {
 
   hideLeaderboard() {
     $('hud-leaderboard')?.classList.add('hidden');
+  }
+
+  // ─── Classic FFA ─────────────────────────────────────────
+  showClassicTimer(on = true) {
+    $('hud-classic-timer')?.classList.toggle('hidden', !on);
+  }
+
+  /** @param {number|null} sec */
+  setClassicTimer(sec) {
+    const el = $('hud-classic-timer');
+    if (!el) return;
+    if (sec == null) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    el.textContent = `${m}:${String(s).padStart(2, '0')}`;
+    el.classList.toggle('classic-timer-low', sec <= 30);
+  }
+
+  showClassicMatchOver(rows, winnerName) {
+    if (this._classicMatchOverShown) return;
+    this._classicMatchOverShown = true;
+
+    const banner = $('classic-match-over-banner');
+    if (banner) banner.textContent = 'MATCH OVER';
+    const sub = $('classic-match-winner');
+    if (sub) sub.textContent = winnerName ? `${winnerName} wins` : 'Time\'s up';
+
+    const mount = $('classic-match-leaderboard');
+    if (mount) mount.innerHTML = this._renderFlatLeaderboard(rows);
+
+    this._startClassicQuitCooldown();
+    $('classic-match-over')?.classList.remove('hidden');
+  }
+
+  _startClassicQuitCooldown() {
+    const btn = $('btn-classic-exit');
+    if (!btn) return;
+    if (this._classicQuitTimer) clearInterval(this._classicQuitTimer);
+    btn.disabled = true;
+    let left = 5;
+    btn.textContent = `QUIT (${left})`;
+    this._classicQuitTimer = setInterval(() => {
+      left -= 1;
+      if (left > 0) {
+        btn.textContent = `QUIT (${left})`;
+      } else {
+        btn.textContent = 'QUIT';
+        btn.disabled = false;
+        clearInterval(this._classicQuitTimer);
+        this._classicQuitTimer = null;
+      }
+    }, 1000);
   }
 
   // ─── Lodibidon ───────────────────────────────────────────

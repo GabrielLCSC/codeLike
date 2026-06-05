@@ -114,7 +114,7 @@
           <span class="btn-bracket">[</span> LODI BIDON <span class="btn-bracket">]</span>
         </button>
       </nav>
-      <p class="gametype-sub">Classic — respawn deathmatch · Lodibidon — 2v2 rounds, one life</p>
+      <p class="gametype-sub">Classic — 2 min FFA · Lodibidon — 2v2 rounds, one life</p>
     </div>
 
     <!-- LOADOUT / GUN SELECT SCREEN -->
@@ -162,6 +162,11 @@
           <div class="gun-ammo">5 / 25</div>
         </div>
 
+      </div>
+
+      <div class="map-select-row">
+        <span class="bot-count-label">MAP</span>
+        <div class="map-grid" id="map-grid"></div>
       </div>
 
       <div class="bot-count-row" id="lodibidon-team-row" style="display:none">
@@ -288,6 +293,7 @@
         <div class="header-rule"></div>
       </div>
       <p class="lobby-hint" id="lobby-hint-ffa">Share this code with friends. Up to 4 players.</p>
+      <p class="lobby-hint">Map: <strong id="lbl-lobby-map">Urban Streets</strong></p>
       <p class="lobby-hint hidden" id="lobby-hint-lodibidon">Lodibidon 2v2 — pick ALPHA or OMEGA (max 2 per team). Empty slots are filled by bots.</p>
       <div class="lobby-team-pick hidden" id="lobby-team-pick">
         <span class="bot-count-label">YOUR TEAM</span>
@@ -361,8 +367,11 @@
       <span id="hud-kills">K 0</span>
       <span class="score-sep">·</span>
       <span id="hud-deaths">D 0</span>
+      <span class="score-sep" id="hud-map-tag"></span>
       <span class="score-sep" id="hud-room-tag"></span>
     </div>
+
+    <div id="hud-classic-timer" class="hidden">2:00</div>
 
     <!-- Lodibidon mode HUD -->
     <div id="hud-lodibidon" class="hidden">
@@ -445,6 +454,13 @@
     <button class="confirm-btn" id="btn-lodibidon-exit" disabled>QUIT (5)</button>
   </div>
 
+  <div id="classic-match-over" class="hidden">
+    <h2 id="classic-match-over-banner">MATCH OVER</h2>
+    <p class="classic-match-winner" id="classic-match-winner">Player wins</p>
+    <div id="classic-match-leaderboard" class="classic-match-lb"></div>
+    <button class="confirm-btn" id="btn-classic-exit" disabled>QUIT (5)</button>
+  </div>
+
   <!-- Pointer-lock / pause -->
   <div id="pointer-lock-overlay" class="hidden">
     <div class="plo-box">
@@ -513,7 +529,7 @@
 
   <!-- Loading splash -->
   <div id="loading-screen" class="hidden">
-    <p>GENERATING MAP…</p>
+    <p>LOADING MAP…</p>
     <div class="loading-bar"><div id="loading-fill"></div></div>
   </div>
 

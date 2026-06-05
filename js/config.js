@@ -59,6 +59,9 @@ export const SPAWN_OCCUPANCY_RADIUS = 8;
 /** Assists credited if you damaged target within this window (ms). */
 export const ASSIST_WINDOW_MS   = 5000;
 
+/** Classic FFA match duration (seconds). */
+export const CLASSIC_MATCH_TIME_S = 120;
+
 // ─── GRENADES ────────────────────────────────────────────────
 export const GRENADE_MAX              = 4;
 export const GRENADE_FUSE_S             = 4;    // seconds from unpin until boom

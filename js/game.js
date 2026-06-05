@@ -30,6 +30,8 @@ import {
   updateCharacterOverheadUI,
 } from './character.js';
 import { LodibidonController, yawToward, enemyTeam } from './lodibidon.js';
+import { ClassicMatchController } from './classic-match.js';
+import { DEFAULT_MAP_ID, getMapGameplay } from './maps/index.js';
 
 export class Game {
   /**
@@ -44,6 +46,7 @@ export class Game {
    *   botLevel?:   'private'|'corporal'|'commando'|'veteran',
    *   gameType?:   'ffa'|'lodibidon',
    *   team?:       'alpha'|'omega',
+   *   mapId?:      string,
    *   mp?:         import('./multiplayer.js').MultiplayerManager,
    * }} opts
    */
@@ -131,7 +134,10 @@ export class Game {
     this._lodibidonMatchOverActive = false;
     this._lodibidonLastOneVoicePlayed = false;
     this._lodibidonRoundEndSoundRound = -1;
-    this._playerSpawnSlot = 0;
+    this._classicMatchOverActive = false;
+    this._lastClassicSyncMs = 0;
+    this.mapId = opts.mapId ?? DEFAULT_MAP_ID;
+    /** @type {ClassicMatchController|null} */ this.classicMatch = null;
     this._claimedSpawns   = new Set();
     this.raycaster.far = 80;
 
@@ -157,7 +163,10 @@ export class Game {
     this._lodibidonMatchOverActive = false;
     this._lodibidonLastOneVoicePlayed = false;
     this._lodibidonRoundEndSoundRound = -1;
-
+    this._classicMatchOverActive = false;
+    this._lastClassicSyncMs = 0;
+    this.classicMatch = null;
+    this._playerSpawnSlot = 0;
     this._initRenderer();
     this._initScene();
     this._initMap();
@@ -185,9 +194,11 @@ export class Game {
       this._initPlayerSpawnSlot();
       this._initPlayer();
       this._initSystems();
+      this.classicMatch = new ClassicMatchController(this);
       this._bindInput();
       if ((this.opts.botCount ?? 0) > 0) this._initBots(this.opts.botCount);
       if (this.mp) this._setupMultiplayer();
+      if (!this._isMpClient()) this.classicMatch.start();
     }
 
     this.hud.show();
@@ -216,6 +227,8 @@ export class Game {
     this._lodibidonRoundEndSoundRound = -1;
     this.lodibidon?.dispose();
     this.lodibidon = null;
+    this.classicMatch?.dispose();
+    this.classicMatch = null;
     this.particles?.dispose();
     this.renderer?.dispose();
     this.scene = null;
@@ -225,6 +238,7 @@ export class Game {
     document.getElementById('pointer-lock-overlay').classList.add('hidden');
     document.getElementById('death-screen').classList.add('hidden');
     document.getElementById('lodibidon-match-over')?.classList.add('hidden');
+    document.getElementById('classic-match-over')?.classList.add('hidden');
     document.getElementById('lodibidon-round-end')?.classList.add('hidden');
     document.getElementById('lodibidon-spectate')?.classList.add('hidden');
     document.getElementById('lodibidon-prep')?.classList.add('hidden');
@@ -271,8 +285,13 @@ export class Game {
   }
 
   _initMap() {
-    this.map = new MapGenerator().generate();
+    const mapId = this.mp?.mapId ?? this.mapId ?? DEFAULT_MAP_ID;
+    this.mapId = mapId;
+    this.map = new MapGenerator(mapId).generate(mapId);
     this.map.buildScene(this.scene);
+    const mapName = getMapGameplay(mapId).meta.name;
+    const tag = document.getElementById('hud-map-tag');
+    if (tag) tag.textContent = mapName;
   }
 
   _initPlayer() {
@@ -290,7 +309,7 @@ export class Game {
 
     const plo = document.getElementById('pointer-lock-overlay');
     plo.addEventListener('click', () => {
-      if (this._isLodibidonMatchOver()) return;
+      if (this._isLodibidonMatchOver() || this._isClassicMatchOver()) return;
       if (this.running && (this.alive || this.lodibidon?.spectating)) this.controls.lock();
     }, { capture: true });
 
@@ -303,6 +322,10 @@ export class Game {
     this.controls.addEventListener('unlock', () => {
       if (!this.running) return;
       if (this._isLodibidonMatchOver()) {
+        plo.classList.add('hidden');
+        return;
+      }
+      if (this._isClassicMatchOver()) {
         plo.classList.add('hidden');
         return;
       }
@@ -921,6 +944,27 @@ export class Game {
     return this.lodibidon?.phase === 'match_over' || this._lodibidonMatchOverActive;
   }
 
+  _isClassicMatchOver() {
+    return this.classicMatch?.isOver() || this._classicMatchOverActive;
+  }
+
+  /** Unlock pointer and show final FFA standings. */
+  _enterClassicMatchOver() {
+    if (this._classicMatchOverActive) return;
+    this._classicMatchOverActive = true;
+    this.mouseDown = false;
+    this.keys.clear();
+    this.controls?.unlock();
+    document.getElementById('pointer-lock-overlay')?.classList.add('hidden');
+    document.getElementById('death-screen')?.classList.add('hidden');
+    this.hud?.cancelMedal();
+    sound.stopVoiceAndMedals();
+
+    const rows = this._getLeaderboardRows().rows ?? [];
+    const winner = rows[0]?.name ?? '—';
+    this.hud.showClassicMatchOver(rows, winner);
+  }
+
   /** Unlock pointer, hide pause panel — match-end scoreboard needs mouse. */
   _enterLodibidonMatchOver() {
     if (this._lodibidonMatchOverActive) return;
@@ -1415,6 +1459,8 @@ export class Game {
           this._lodibidonResetRound();
         }
       };
+    } else if (this.classicMatch) {
+      this.mp.onClassicUpdate = data => this.classicMatch.applyState(data);
     }
   }
 
@@ -1456,6 +1502,18 @@ export class Game {
       }
     }
 
+    if (this.classicMatch) {
+      this.classicMatch.tick(nowMs);
+      if (this._isClassicMatchOver()) {
+        this._enterClassicMatchOver();
+        this.particles.update(delta);
+        this._updateRemotePlayers(delta);
+        this.mapScanner?.scan(this.camera.position.x, this.camera.position.z);
+        this._syncLocalPlayerPosition(nowMs);
+        return;
+      }
+    }
+
     if (this.lodibidon?.spectating) {
       this._updateBots(delta, nowMs);
       this._syncBotsToFirebase(nowMs);
@@ -1474,11 +1532,13 @@ export class Game {
 
     const canAct = !this.lodibidon || this.lodibidon.canAct();
 
-    if (canAct && this.mouseDown && this.weapon.def.automatic && this.controls.isLocked) {
+    const canActClassic = !this.classicMatch || this.classicMatch.canAct();
+
+    if (canActClassic && canAct && this.mouseDown && this.weapon.def.automatic && this.controls.isLocked) {
       this._tryShoot(nowMs);
     }
 
-    if (canAct) {
+    if (canActClassic && canAct) {
       this._updateMovement(delta);
       this._updatePhysics(delta);
     }
@@ -1653,6 +1713,7 @@ export class Game {
   _tryShoot(nowMs) {
     if (!this.alive || !this.controls.isLocked || this.weapon.reloading) return;
     if (this.lodibidon && !this.lodibidon.canShoot()) return;
+    if (this.classicMatch && !this.classicMatch.canAct()) return;
     if (this.grenades?.isPrimed) return;
 
     if (this.weapon.ammo <= 0) {
@@ -1798,7 +1859,7 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   takeDamage(amount, killerName = 'Enemy') {
-    if (!this.alive) return;
+    if (!this.alive || this._isClassicMatchOver()) return;
     this.health      = Math.max(0, this.health - amount);
     this.lastDamageMs = performance.now();
     this._hitShake   = Math.min(1.0, this._hitShake + amount / 25);
@@ -1869,6 +1930,8 @@ export class Game {
     this.hud.addKillFeed(killerName, this.username);
     this.hud.setScore(this.kills, this.deaths);
     this.hud.showDeathScreen(killerName);
+
+    if (this._isClassicMatchOver()) return;
 
     let countdown = RESPAWN_TIME;
     this.hud.setRespawnCountdown(countdown);
