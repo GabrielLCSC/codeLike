@@ -31,6 +31,7 @@ export class HUD {
     this._hmTimeout  = null;
     /** @type {ReturnType<typeof setInterval>|null} */
     this._lodQuitTimer = null;
+    this._lodMatchOverShown = false;
     /** @type {Map<string, { wx:number, wz:number, color:string, t:number }>} */
     this._radarHits  = new Map();
     /** @type {HTMLCanvasElement|null} */
@@ -601,6 +602,9 @@ export class HUD {
   }
 
   showLodibidonMatchOver(winner, scores, stats, playerTeam) {
+    if (this._lodMatchOverShown) return;
+    this._lodMatchOverShown = true;
+
     this.hideLodibidonRoundEnd();
 
     const banner = $('lod-match-over-banner');

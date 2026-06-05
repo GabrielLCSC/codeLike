@@ -178,8 +178,8 @@ export class Game {
       if (this.mp) this._setupMultiplayer();
       if (!this._isMpClient()) {
         const nowMs = performance.now();
-        this.lodibidon.startRound(nowMs);
-        this.mp?.syncMatch(this.lodibidon.buildMatchState(nowMs));
+        this.lodibidon.startRound();
+        this.mp?.syncMatch(this.lodibidon.buildMatchState());
       }
     } else {
       this._initPlayerSpawnSlot();
@@ -676,7 +676,7 @@ export class Game {
     return n;
   }
 
-  _lodibidonResetRound(nowMs) {
+  _lodibidonResetRound() {
     this._lodibidonSpawnRotation = (this._lodibidonSpawnRotation ?? 0) + 1;
     const center = this.map.lodibidonCenter;
     this.alive = true;
@@ -716,8 +716,8 @@ export class Game {
     this.hud.setLodibidonAlive(null);
     this._lodibidonLastOneVoicePlayed = false;
 
-    this.lodibidon.startRound(nowMs);
-    this.mp?.syncMatch(this.lodibidon.buildMatchState(nowMs));
+    this.lodibidon.startRound();
+    this.mp?.syncMatch(this.lodibidon.buildMatchState());
     setTimeout(() => { if (this.running && this.alive) this.controls.lock(); }, 150);
   }
 
@@ -1152,8 +1152,15 @@ export class Game {
   }
 
   _handleWorldEvent(evt) {
+    if (evt.type === 'bot_kill') {
+      if (evt.shooter === this.mp?.uid) {
+        this._onKill(`Bot-${evt.botIndex + 1}`, false);
+      }
+      return;
+    }
+
     if (evt.shooter === this.mp?.uid) {
-      if (evt.type === 'shot' || evt.type === 'bot_shot' || evt.type === 'grenade_throw' || evt.type === 'bot_kill') {
+      if (evt.type === 'shot' || evt.type === 'bot_shot' || evt.type === 'grenade_throw') {
         return;
       }
     }
@@ -1191,11 +1198,6 @@ export class Game {
               }
             }
           }
-        }
-        break;
-      case 'bot_kill':
-        if (evt.shooter === this.mp.uid) {
-          this._onKill(`Bot-${evt.botIndex + 1}`, false);
         }
         break;
       case 'lod_elim':
@@ -1257,7 +1259,7 @@ export class Game {
         // skips the kill block — preventing the kill from counting multiple times.
         const wasAlive = rp.data.alive;
         rp.data       = data;
-        rp.targetPos.set(data.x, data.y ?? 0, data.z);
+        rp.targetPos.set(data.x, 0, data.z);
         rp.targetRotY = data.rotY ?? 0;
         rp.mesh.visible = !!data.alive;
 
@@ -1280,16 +1282,16 @@ export class Game {
           data.name ?? 'Player',
           data.team,
         );
-        mesh.position.set(data.x ?? 0, data.y ?? 0, data.z ?? 0);
+        mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
           mesh,
           rig,
           healthBar,
           data,
-          targetPos:  new THREE.Vector3(data.x ?? 0, data.y ?? 0, data.z ?? 0),
+          targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
-          prevPos:    new THREE.Vector3(data.x ?? 0, data.y ?? 0, data.z ?? 0),
+          prevPos:    new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
         });
       }
     };
@@ -1317,7 +1319,7 @@ export class Game {
         const prevRound = this.lodibidon.roundNumber;
         this.lodibidon.applyMatchState(data);
         if (data.round > prevRound && data.phase === 'prep') {
-          this._lodibidonResetRound(performance.now());
+          this._lodibidonResetRound();
         }
       };
     }
@@ -1343,11 +1345,12 @@ export class Game {
     if (this.lodibidon) {
       if (this._isMpClient()) {
         this.lodibidon._updateSpectate();
+        this.lodibidon.syncHudTimers();
       } else {
         this.lodibidon.tick(delta, nowMs);
         if (this._isMpHost() && nowMs - this._lastMatchSyncMs > 150) {
           this._lastMatchSyncMs = nowMs;
-          this.mp.syncMatch(this.lodibidon.buildMatchState(nowMs));
+          this.mp.syncMatch(this.lodibidon.buildMatchState());
         }
       }
       if (this.lodibidon.phase === 'match_over') {
@@ -1369,7 +1372,7 @@ export class Game {
 
     if (!this.alive) return;
 
-    const canAct = !this.lodibidon || this.lodibidon.canAct(nowMs);
+    const canAct = !this.lodibidon || this.lodibidon.canAct();
 
     if (canAct && this.mouseDown && this.weapon.def.automatic && this.controls.isLocked) {
       this._tryShoot(nowMs);
@@ -1822,7 +1825,7 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _updateBots(delta, nowMs) {
-    const botCanAct = !this.lodibidon || this.lodibidon.canAct(nowMs);
+    const botCanAct = !this.lodibidon || this.lodibidon.canAct();
 
     if (this._isMpClient()) {
       this.syncedBots.forEach(sb => {
