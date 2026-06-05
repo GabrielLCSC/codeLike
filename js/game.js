@@ -12,7 +12,7 @@ import {
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
   MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
-  GRENADE_DAMAGE, GRENADE_RADIUS, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
+  GRENADE_DAMAGE, GRENADE_RADIUS, GRENADE_MAX, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
   SYNC_INTERVAL, REMOTE_INTERP_SPEED, REMOTE_EXTRAP_S, REMOTE_SNAP_DIST,
   LODIBIDON_BOT_HIT_BONUS,
 } from './config.js';
@@ -729,11 +729,38 @@ export class Game {
 
   _getBotCombatTarget(bot) {
     if (!this._isLodibidon()) {
-      return {
-        x: this.camera.position.x,
-        z: this.camera.position.z,
-        isPlayer: true,
-      };
+      /** @type {{ x:number, z:number, isPlayer?: boolean, playerUid?: string }[]} */
+      const enemies = [];
+
+      if (this.alive) {
+        enemies.push({
+          x: this.camera.position.x,
+          z: this.camera.position.z,
+          isPlayer: true,
+        });
+      }
+
+      for (const [uid, rp] of this.remotePlayers) {
+        if (!(rp.data.alive ?? true)) continue;
+        enemies.push({
+          x: rp.mesh.position.x,
+          z: rp.mesh.position.z,
+          isPlayer: true,
+          playerUid: uid,
+        });
+      }
+
+      if (!enemies.length) return null;
+
+      const bx = bot.mesh.position.x;
+      const bz = bot.mesh.position.z;
+      let best = enemies[0];
+      let bestD = Infinity;
+      for (const e of enemies) {
+        const d = (e.x - bx) ** 2 + (e.z - bz) ** 2;
+        if (d < bestD) { bestD = d; best = e; }
+      }
+      return best;
     }
 
     const phase = this.lodibidon.phase;
@@ -1475,6 +1502,7 @@ export class Game {
         this.grenades.isPrimed,
         this.grenades.fuseLeft,
         this.controls.isLocked,
+        this.grenades.throwCharge,
       );
     }
     this.particles.update(delta);
@@ -1535,9 +1563,14 @@ export class Game {
     if (performance.now() < this._ammoChestReadyAt) return;
     const magFull = this.weapon.ammo === this.weapon.def.magSize;
     const resFull = this.weapon.reserve === this.weapon.def.reserve;
-    if (magFull && resFull) return;
+    const grenadesFull = (this.grenades?.count ?? 0) >= GRENADE_MAX;
+    if (magFull && resFull && grenadesFull) return;
 
-    this.weapon.refillAmmo();
+    if (!magFull || !resFull) this.weapon.refillAmmo();
+    if (!grenadesFull) {
+      this.grenades?.refillToMax();
+      this.hud.setGrenades(this.grenades.count);
+    }
     this._ammoChestReadyAt = performance.now() + AMMO_CHEST_COOLDOWN_MS;
     sound.play('ui_click', { volume: 0.55, pitch: 1.15 });
   }

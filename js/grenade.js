@@ -6,11 +6,15 @@ import * as THREE from 'three';
 import {
   GRENADE_MAX,
   GRENADE_FUSE_S,
-  GRENADE_THROW_SPEED,
-  GRENADE_THROW_LIFT,
+  GRENADE_THROW_SPEED_MIN,
+  GRENADE_THROW_SPEED_MAX,
+  GRENADE_THROW_LIFT_MIN,
+  GRENADE_THROW_LIFT_MAX,
+  GRENADE_THROW_HOLD_MAX_S,
   GRENADE_DAMAGE,
   GRENADE_RADIUS,
   GRENADE_GRAVITY,
+  GRENADE_WALL_COLLIDE_MAX_Y,
 } from './config.js';
 import { sound } from './sound.js';
 
@@ -66,6 +70,7 @@ export class GrenadeSystem {
     this._fuseLeft  = 0;
     this._handMesh  = null;
     this._pinPhase  = 0;
+    this._primeStartMs = 0;
 
     /** @type {{ mesh: THREE.Group, pos: THREE.Vector3, vel: THREE.Vector3, fuse: number }[]} */
     this._active = [];
@@ -74,9 +79,20 @@ export class GrenadeSystem {
   get isPrimed() { return this._primed; }
   get fuseLeft() { return this._fuseLeft; }
 
+  /** 0–1 charge from how long E has been held (longer = farther throw). */
+  get throwCharge() {
+    if (!this._primed) return 0;
+    const holdSec = (performance.now() - this._primeStartMs) / 1000;
+    return Math.min(1, holdSec / GRENADE_THROW_HOLD_MAX_S);
+  }
+
   reset() {
     this._cancelPrime();
     this._clearActive();
+    this.count = GRENADE_MAX;
+  }
+
+  refillToMax() {
     this.count = GRENADE_MAX;
   }
 
@@ -88,9 +104,10 @@ export class GrenadeSystem {
     this._weapon.setADS(false);
     this._weapon.setViewSuppressed(true);
 
-    this._primed   = true;
-    this._fuseLeft = GRENADE_FUSE_S;
-    this._pinPhase = 0;
+    this._primed        = true;
+    this._fuseLeft       = GRENADE_FUSE_S;
+    this._pinPhase       = 0;
+    this._primeStartMs   = performance.now();
 
     this._handMesh = makeGrenadeMesh();
     this._camera.add(this._handMesh);
@@ -100,7 +117,7 @@ export class GrenadeSystem {
     return true;
   }
 
-  /** E up — throw; fuse keeps counting from unpin. */
+  /** E up — throw; fuse keeps counting from unpin. Longer hold = farther throw. */
   releaseThrow() {
     if (!this._primed) return;
 
@@ -110,11 +127,17 @@ export class GrenadeSystem {
     this._camera.getWorldDirection(_fwd);
     _right.setFromMatrixColumn(this._camera.matrix, 0);
 
-    _throwVel.copy(_fwd).multiplyScalar(GRENADE_THROW_SPEED);
-    _throwVel.y += GRENADE_THROW_LIFT;
-    _throwVel.addScaledVector(_right, 0.6);
+    const charge = this.throwCharge;
+    const speed = GRENADE_THROW_SPEED_MIN
+      + charge * (GRENADE_THROW_SPEED_MAX - GRENADE_THROW_SPEED_MIN);
+    const lift = GRENADE_THROW_LIFT_MIN
+      + charge * (GRENADE_THROW_LIFT_MAX - GRENADE_THROW_LIFT_MIN);
 
-    this._spawnWorldGrenade(pos, _throwVel, { broadcast: true });
+    _throwVel.copy(_fwd).multiplyScalar(speed);
+    _throwVel.y += lift;
+    _throwVel.addScaledVector(_right, 0.4 + charge * 0.35);
+
+    this._spawnWorldGrenade(pos, _throwVel, { broadcast: true, charge });
     this._endPrimeConsume();
   }
 
@@ -139,7 +162,8 @@ export class GrenadeSystem {
       g.pos.addScaledVector(g.vel, delta);
 
       const map = this._hooks.getMap();
-      if (map.isWall(g.pos.x, g.pos.z)) {
+      // Grid walls are infinite height — only collide near ground level.
+      if (g.pos.y <= GRENADE_WALL_COLLIDE_MAX_Y && map.isWall(g.pos.x, g.pos.z)) {
         g.vel.x *= -0.35;
         g.vel.z *= -0.35;
       }
@@ -169,13 +193,18 @@ export class GrenadeSystem {
   _updateHandPose(delta) {
     if (!this._handMesh) return;
     const t = this._pinPhase;
-    this._handMesh.position.set(0.28 + Math.sin(t) * 0.008, -0.14 + Math.cos(t * 0.7) * 0.006, -0.38);
+    const pullBack = this.throwCharge * 0.06;
+    this._handMesh.position.set(
+      0.28 + Math.sin(t) * 0.008 - pullBack,
+      -0.14 + Math.cos(t * 0.7) * 0.006,
+      -0.38 - pullBack * 0.5,
+    );
     this._handMesh.rotation.set(-0.35 + Math.sin(t * 0.5) * 0.04, 0.45, 0.25);
     const pin = this._handMesh.getObjectByName('pin');
     if (pin) pin.rotation.z = Math.min(Math.PI * 0.55, t * 0.35);
   }
 
-  _spawnWorldGrenade(pos, vel, { broadcast = false } = {}) {
+  _spawnWorldGrenade(pos, vel, { broadcast = false, charge = 0 } = {}) {
     const mesh = makeGrenadeMesh();
     mesh.scale.setScalar(1.35);
     mesh.position.copy(pos);
@@ -193,6 +222,7 @@ export class GrenadeSystem {
         x: pos.x, y: pos.y, z: pos.z,
         vx: vel.x, vy: vel.y, vz: vel.z,
         fuse: this._fuseLeft,
+        charge,
       });
     }
   }
@@ -234,6 +264,7 @@ export class GrenadeSystem {
     }
     this._primed = false;
     this._fuseLeft = 0;
+    this._primeStartMs = 0;
     this._weapon.setViewSuppressed(false);
   }
 
@@ -248,3 +279,5 @@ export class GrenadeSystem {
     this._active = [];
   }
 }
+
+export { falloffDamage, GRENADE_DAMAGE, GRENADE_RADIUS };

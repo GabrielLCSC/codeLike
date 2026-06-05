@@ -82,7 +82,7 @@ export class HUD {
     if (el) el.textContent = `G ${count}`;
   }
 
-  showGrenadePrime(primed, fuseLeft, showHud) {
+  showGrenadePrime(primed, fuseLeft, showHud, throwCharge = 0) {
     const el = $('hud-grenade-hint');
     if (!el) return;
     if (!primed || !showHud) {
@@ -90,6 +90,11 @@ export class HUD {
       return;
     }
     el.classList.remove('hidden');
+    const title = el.querySelector('.grenade-hint-title');
+    if (title) {
+      const pct = Math.round(Math.max(0, Math.min(1, throwCharge)) * 100);
+      title.textContent = pct > 2 ? `GRENADE · ${pct}% range` : 'GRENADE · hold E for range';
+    }
     const fill = $('hud-grenade-fuse-fill');
     const lbl  = $('hud-grenade-fuse-lbl');
     const pct  = Math.max(0, Math.min(1, fuseLeft / GRENADE_FUSE_S));
@@ -106,7 +111,7 @@ export class HUD {
     }
     el.classList.remove('hidden');
     if (ready) {
-      el.innerHTML = '<span class="ammo-hint-key">F</span> Resupply ammo';
+      el.innerHTML = '<span class="ammo-hint-key">F</span> Resupply ammo &amp; grenades';
     } else {
       el.textContent = `Ammo chest — ${cooldownSec}s`;
     }
