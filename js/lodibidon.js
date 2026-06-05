@@ -55,6 +55,11 @@ export class LodibidonController {
     this._appliedMatchKey = '';
     this._roundEndUiRound = -1;
     this._matchOverUiShown = false;
+    /** @type {number} host-authoritative ms left in current phase (MP clients) */
+    this._syncedRemainingMs = 0;
+    /** @type {number} local Date.now() when _syncedRemainingMs was received */
+    this._syncedRemainingAt = 0;
+    this._hasMatchState = false;
   }
 
   static isMode(opts) {
@@ -66,11 +71,25 @@ export class LodibidonController {
     return this.playerTeam;
   }
 
+  /** Ms left in the current phase (host: wall clock; MP client: synced snapshot). */
+  _phaseRemainingMs() {
+    if (this.game._isMpClient()) {
+      const elapsed = Date.now() - this._syncedRemainingAt;
+      return Math.max(0, this._syncedRemainingMs - elapsed);
+    }
+    return Math.max(0, this.phaseEndsAt - Date.now());
+  }
+
+  _applySyncedRemaining(data) {
+    if (data?.phaseRemainingMs == null) return;
+    this._syncedRemainingMs = Math.max(0, data.phaseRemainingMs);
+    this._syncedRemainingAt = Date.now();
+  }
+
   /** Combat/movement allowed (prep freezes body, not look). */
   canAct() {
-    const now = Date.now();
     if (this.phase === 'round_end' || this.phase === 'match_over') return false;
-    if (this.phase === 'prep' && now < this.phaseEndsAt) return false;
+    if (this.phase === 'prep' && this._phaseRemainingMs() > 0) return false;
     if (!this.game.alive || this.spectating) return false;
     return this.phase === 'live' || this.phase === 'flag';
   }
@@ -108,23 +127,30 @@ export class LodibidonController {
     this.game.hud.setLodibidonPrep(Math.ceil(LODIBIDON_PREP_TIME_S));
   }
 
-  /** MP clients: drive prep / round timer HUD from synced wall-clock deadline. */
+  /** MP clients: drive prep / round timer HUD from host-synced remaining time. */
   syncHudTimers() {
-    const now = Date.now();
+    if (this.game._isMpClient() && !this._hasMatchState) {
+      this.game.hud.hideLodibidonPrep();
+      return;
+    }
+
+    const leftSec = Math.ceil(this._phaseRemainingMs() / 1000);
+
     if (this.phase === 'prep') {
-      const left = Math.ceil((this.phaseEndsAt - now) / 1000);
-      this.game.hud.setLodibidonPrep(Math.max(0, left));
-    } else if (this.phase === 'live') {
-      const left = Math.max(0, Math.ceil((this.phaseEndsAt - now) / 1000));
-      this.game.hud.setLodibidonTimer(left);
+      const sec = Math.max(0, Math.min(leftSec, LODIBIDON_PREP_TIME_S + 1));
+      this.game.hud.setLodibidonPrep(sec);
     } else {
       this.game.hud.hideLodibidonPrep();
-      if (this.phase !== 'live') this.game.hud.setLodibidonTimer(null);
+      if (this.phase === 'live') {
+        this.game.hud.setLodibidonTimer(Math.max(0, leftSec));
+      } else {
+        this.game.hud.setLodibidonTimer(null);
+      }
     }
   }
 
   _matchStateKey(data) {
-    const { ts, ...rest } = data;
+    const { ts, phaseRemainingMs, serverNow, ...rest } = data;
     return JSON.stringify(rest);
   }
 
@@ -195,56 +221,64 @@ export class LodibidonController {
   /** Apply Firebase match snapshot (clients). */
   applyMatchState(data) {
     if (!data) return;
+
+    this._applySyncedRemaining(data);
+
     const key = this._matchStateKey(data);
-    if (key === this._appliedMatchKey) return;
-    this._appliedMatchKey = key;
+    if (key !== this._appliedMatchKey) {
+      this._appliedMatchKey = key;
+      this._hasMatchState = true;
 
-    this.roundNumber = data.round ?? this.roundNumber;
-    this.scores = { alpha: data.scores?.alpha ?? 0, omega: data.scores?.omega ?? 0 };
-    this.phase = data.phase ?? this.phase;
-    this.phaseEndsAt = data.phaseEndsAt ?? this.phaseEndsAt;
-    this.flagActive = !!data.flagActive;
-    this.captureProgress = data.captureProgress ?? 0;
-    this.captureTeam = data.captureTeam ?? null;
-    this.roundWinner = data.roundWinner ?? null;
-    this.matchWinner = data.matchWinner ?? null;
-    this.winReason = data.winReason ?? '';
+      this.roundNumber = data.round ?? this.roundNumber;
+      this.scores = { alpha: data.scores?.alpha ?? 0, omega: data.scores?.omega ?? 0 };
+      this.phase = data.phase ?? this.phase;
+      this.phaseEndsAt = data.phaseEndsAt ?? this.phaseEndsAt;
+      this.flagActive = !!data.flagActive;
+      this.captureProgress = data.captureProgress ?? 0;
+      this.captureTeam = data.captureTeam ?? null;
+      this.roundWinner = data.roundWinner ?? null;
+      this.matchWinner = data.matchWinner ?? null;
+      this.winReason = data.winReason ?? '';
 
-    if (this.flagActive) this._showFlag();
-    else this._hideFlag();
+      if (this.flagActive) this._showFlag();
+      else this._hideFlag();
 
-    this.game.hud.setLodibidonScore(this.scores, this.roundNumber);
-    this.game.hud.setLodibidonCapture(this.captureTeam, this.captureProgress);
-    this.game.hud.setLodibidonFlagActive(this.flagActive);
+      this.game.hud.setLodibidonScore(this.scores, this.roundNumber);
+      this.game.hud.setLodibidonCapture(this.captureTeam, this.captureProgress);
+      this.game.hud.setLodibidonFlagActive(this.flagActive);
+
+      if (this.phase === 'round_end' && this.roundWinner && this.roundNumber !== this._roundEndUiRound) {
+        this._roundEndUiRound = this.roundNumber;
+        this.game.hud.showLodibidonRoundEnd(
+          this.roundWinner, this.winReason, this.scores, this.roundNumber, this.playerTeam,
+        );
+        this.game._playLodibidonRoundEndSound(this.roundNumber);
+      }
+      if (this.phase === 'match_over' && this.matchWinner) {
+        this.game._enterLodibidonMatchOver();
+        this._showMatchOverUi();
+      }
+    }
 
     this.syncHudTimers();
-
-    if (this.phase === 'round_end' && this.roundWinner && this.roundNumber !== this._roundEndUiRound) {
-      this._roundEndUiRound = this.roundNumber;
-      this.game.hud.showLodibidonRoundEnd(
-        this.roundWinner, this.winReason, this.scores, this.roundNumber, this.playerTeam,
-      );
-      this.game._playLodibidonRoundEndSound(this.roundNumber);
-    }
-    if (this.phase === 'match_over' && this.matchWinner) {
-      this.game._enterLodibidonMatchOver();
-      this._showMatchOverUi();
-    }
   }
 
   buildMatchState() {
+    const now = Date.now();
     return {
       round:           this.roundNumber,
       scores:          { ...this.scores },
       phase:           this.phase,
       phaseEndsAt:     this.phaseEndsAt,
+      phaseRemainingMs: Math.max(0, this.phaseEndsAt - now),
+      serverNow:       now,
       flagActive:      this.flagActive,
       captureProgress: this.captureProgress,
       captureTeam:     this.captureTeam,
       roundWinner:     this.roundWinner,
       matchWinner:     this.matchWinner,
       winReason:       this.winReason,
-      ts:              Date.now(),
+      ts:              now,
     };
   }
 
@@ -334,7 +368,7 @@ export class LodibidonController {
       this.game.hud.setLodibidonTimer(null);
       return;
     }
-    const left = Math.max(0, Math.ceil((this.phaseEndsAt - Date.now()) / 1000));
+    const left = Math.max(0, Math.ceil(this._phaseRemainingMs() / 1000));
     this.game.hud.setLodibidonTimer(left);
   }
 

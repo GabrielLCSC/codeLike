@@ -304,17 +304,19 @@ export class MultiplayerManager {
   _defaultMatchState() {
     const now = Date.now();
     return {
-      round:           1,
-      scores:          { alpha: 0, omega: 0 },
-      phase:           'prep',
-      phaseEndsAt:     now + 3000,
-      flagActive:      false,
-      captureProgress: 0,
-      captureTeam:     null,
-      roundWinner:     null,
-      matchWinner:     null,
-      winReason:       '',
-      ts:              now,
+      round:            1,
+      scores:           { alpha: 0, omega: 0 },
+      phase:            'prep',
+      phaseEndsAt:      now + 3000,
+      phaseRemainingMs: 3000,
+      serverNow:        now,
+      flagActive:       false,
+      captureProgress:  0,
+      captureTeam:      null,
+      roundWinner:      null,
+      matchWinner:      null,
+      winReason:        '',
+      ts:               now,
     };
   }
 

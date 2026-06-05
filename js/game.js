@@ -716,6 +716,12 @@ export class Game {
     this.hud.setLodibidonAlive(null);
     this._lodibidonLastOneVoicePlayed = false;
 
+    // Host advances phase/timer; clients mirror via applyMatchState only.
+    if (this._isMpClient()) {
+      setTimeout(() => { if (this.running && this.alive) this.controls.lock(); }, 150);
+      return;
+    }
+
     this.lodibidon.startRound();
     this.mp?.syncMatch(this.lodibidon.buildMatchState());
     setTimeout(() => { if (this.running && this.alive) this.controls.lock(); }, 150);
