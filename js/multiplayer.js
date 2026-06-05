@@ -2,7 +2,7 @@
 //  WARFRONT — Firebase Realtime Database multiplayer manager
 // ═══════════════════════════════════════════════════════════
 
-import { FIREBASE_CONFIG, MAX_PLAYERS } from './config.js';
+import { FIREBASE_CONFIG, MAX_PLAYERS, PLAYER_HEIGHT } from './config.js';
 
 export class MultiplayerManager {
   constructor() {
@@ -155,6 +155,7 @@ export class MultiplayerManager {
   // ─── REAL-TIME DATA PUSH ─────────────────────────────
   updatePosition(x, y, z, rotY, gx = null, gz = null) {
     if (!this.roomRef) return;
+    // x/z = world horizontal; y = camera eye height (includes jump arc).
     const patch = { x, y, z, rotY, ts: Date.now() };
     if (gx !== null) patch.gx = gx;
     if (gz !== null) patch.gz = gz;
@@ -291,7 +292,7 @@ export class MultiplayerManager {
       isHost,
       team,
       spectating: false,
-      x: 0, y: 0, z: 0, rotY: 0,
+      x: 0, y: PLAYER_HEIGHT, z: 0, rotY: 0,
       health:  100,
       kills:   0,
       deaths:  0,

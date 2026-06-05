@@ -1254,30 +1254,55 @@ export class Game {
     return keys[Math.floor(Math.random() * keys.length)];
   }
 
+  /** Camera eye Y → character feet Y (mesh origin). */
+  _eyeHeightToFeetY(eyeY) {
+    return Math.max(0, (eyeY ?? PLAYER_HEIGHT) - PLAYER_HEIGHT);
+  }
+
+  /** Push local x/y/z (+ rot) to Firebase on a fixed interval. */
+  _syncLocalPlayerPosition(nowMs) {
+    if (!this.mp || !this.mapScanner) return;
+    if (nowMs - this.lastSyncMs < SYNC_INTERVAL) return;
+    this.lastSyncMs = nowMs;
+
+    const pos = this.camera.position;
+    this.camera.getWorldDirection(this._camDir);
+    const dir = this._camDir;
+    const { gx, gz } = this.mapScanner.worldToCell(pos.x, pos.z);
+    this._lastSyncGx = gx;
+    this._lastSyncGz = gz;
+    this.mp.updatePosition(pos.x, pos.y, pos.z, Math.atan2(dir.x, dir.z), gx, gz);
+  }
+
   /** Push a network snapshot into a remote player proxy (velocity for smoothing). */
   _applyRemoteSnapshot(rp, data) {
-    const x = data.x ?? 0;
-    const z = data.z ?? 0;
+    const x = data.x ?? rp.snapshotX ?? 0;
+    const y = data.y ?? rp.snapshotY ?? PLAYER_HEIGHT;
+    const z = data.z ?? rp.snapshotZ ?? 0;
     const ts = data.ts ?? Date.now();
 
-    if (rp.snapshotTs != null && ts > rp.snapshotTs) {
+    if (rp.snapshotTs != null && ts >= rp.snapshotTs) {
       const dt = (ts - rp.snapshotTs) / 1000;
       if (dt > 0.001 && dt < 1.5) {
         rp.velX = (x - rp.snapshotX) / dt;
+        rp.velY = (y - rp.snapshotY) / dt;
         rp.velZ = (z - rp.snapshotZ) / dt;
-        const maxV = PLAYER_SPEED * SPRINT_MULT * 1.15;
-        const spd = Math.hypot(rp.velX, rp.velZ);
-        if (spd > maxV) {
-          rp.velX = (rp.velX / spd) * maxV;
-          rp.velZ = (rp.velZ / spd) * maxV;
+        const maxH = PLAYER_SPEED * SPRINT_MULT * 1.15;
+        const hSpd = Math.hypot(rp.velX, rp.velZ);
+        if (hSpd > maxH) {
+          rp.velX = (rp.velX / hSpd) * maxH;
+          rp.velZ = (rp.velZ / hSpd) * maxH;
         }
+        rp.velY = Math.max(-18, Math.min(18, rp.velY));
       }
     }
 
     rp.snapshotX = x;
+    rp.snapshotY = y;
     rp.snapshotZ = z;
     rp.snapshotTs = ts;
-    rp.targetPos.set(x, 0, z);
+    const feetY = this._eyeHeightToFeetY(y);
+    rp.targetPos.set(x, feetY, z);
     rp.targetRotY = data.rotY ?? rp.targetRotY ?? 0;
   }
 
@@ -1314,19 +1339,22 @@ export class Game {
           data.name ?? 'Player',
           data.team,
         );
-        mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
+        const feetY = this._eyeHeightToFeetY(data.y);
+        mesh.position.set(data.x ?? 0, feetY, data.z ?? 0);
         this.scene.add(mesh);
         const rp = {
           mesh,
           rig,
           healthBar,
           data,
-          targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
+          targetPos:  new THREE.Vector3(data.x ?? 0, feetY, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
-          prevPos:    new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
+          prevPos:    new THREE.Vector3(data.x ?? 0, feetY, data.z ?? 0),
           velX:       0,
+          velY:       0,
           velZ:       0,
           snapshotX:  data.x ?? 0,
+          snapshotY:  data.y ?? PLAYER_HEIGHT,
           snapshotZ:  data.z ?? 0,
           snapshotTs: data.ts ?? Date.now(),
         };
@@ -1395,6 +1423,8 @@ export class Game {
         this._enterLodibidonMatchOver();
         this.particles.update(delta);
         this._updateRemotePlayers(delta);
+        this.mapScanner?.scan(this.camera.position.x, this.camera.position.z);
+        this._syncLocalPlayerPosition(nowMs);
         return;
       }
     }
@@ -1405,10 +1435,15 @@ export class Game {
       this._updateRemotePlayers(delta);
       this.particles.update(delta);
       this._updateMinimapAndHud(nowMs);
+      this.mapScanner?.scan(this.camera.position.x, this.camera.position.z);
       return;
     }
 
-    if (!this.alive) return;
+    if (!this.alive) {
+      this._updateRemotePlayers(delta);
+      this.mapScanner?.scan(this.camera.position.x, this.camera.position.z);
+      return;
+    }
 
     const canAct = !this.lodibidon || this.lodibidon.canAct();
 
@@ -1444,20 +1479,8 @@ export class Game {
     }
     this.particles.update(delta);
 
-    if (this.mapScanner) {
-      this.mapScanner.scan(this.camera.position.x, this.camera.position.z);
-
-      if (this.mp && nowMs - this.lastSyncMs >= SYNC_INTERVAL) {
-        this.lastSyncMs = nowMs;
-        const pos = this.camera.position;
-        this.camera.getWorldDirection(this._camDir);
-        const dir = this._camDir;
-        const { gx, gz } = this.mapScanner.worldToCell(pos.x, pos.z);
-        this._lastSyncGx = gx;
-        this._lastSyncGz = gz;
-        this.mp.updatePosition(pos.x, pos.y, pos.z, Math.atan2(dir.x, dir.z), gx, gz);
-      }
-    }
+    this.mapScanner?.scan(this.camera.position.x, this.camera.position.z);
+    this._syncLocalPlayerPosition(nowMs);
 
     if (this._tabHeld && this._canShowLeaderboard()) {
       this.hud.showLeaderboard(this._getLeaderboardRows());
@@ -1893,9 +1916,11 @@ export class Game {
       if (!rp.mesh.visible) return;
 
       const predX = rp.targetPos.x + (rp.velX ?? 0) * REMOTE_EXTRAP_S;
+      const predY = Math.max(0, rp.targetPos.y + (rp.velY ?? 0) * REMOTE_EXTRAP_S);
       const predZ = rp.targetPos.z + (rp.velZ ?? 0) * REMOTE_EXTRAP_S;
 
       const dx = predX - rp.mesh.position.x;
+      const dy = predY - rp.mesh.position.y;
       const dz = predZ - rp.mesh.position.z;
       if (dx * dx + dz * dz > snapDist2) {
         rp.mesh.position.x = predX;
@@ -1903,6 +1928,11 @@ export class Game {
       } else {
         rp.mesh.position.x += dx * smooth;
         rp.mesh.position.z += dz * smooth;
+      }
+      if (Math.abs(dy) > 1.2) {
+        rp.mesh.position.y = Math.max(0, predY);
+      } else {
+        rp.mesh.position.y = Math.max(0, rp.mesh.position.y + dy * smooth);
       }
 
       let rotDiff = rp.targetRotY - rp.mesh.rotation.y;
@@ -1931,7 +1961,8 @@ export class Game {
     const moved = rp.prevPos.distanceTo(rp.mesh.position);
     rp.prevPos.copy(rp.mesh.position);
 
-    const isAirborne = (rp.data.y ?? PLAYER_HEIGHT) > PLAYER_HEIGHT + 0.12;
+    const isAirborne = rp.mesh.position.y > 0.1
+      || (rp.snapshotY ?? rp.data.y ?? PLAYER_HEIGHT) > PLAYER_HEIGHT + 0.1;
 
     let pose = 'idle';
     if (isAirborne) {
