@@ -26,7 +26,8 @@ export class MapGenerator {
     this.rooms  = [];
     this.spawnPoints  = [];
     this.ammoChests   = [];
-    this.wallWeapons  = [];
+    this.groundWeapons = [];
+    this.groundMags    = [];
     this.lanes        = [];
     this.wallMeshes   = [];
     this.staticMeshes = [];
@@ -44,7 +45,8 @@ export class MapGenerator {
     this.grid     = this.mapGrid.grid;
     this.spawnPoints = this.gameplay.spawnPoints.map(s => ({ ...s }));
     this.ammoChests  = this.gameplay.ammoChests.map(c => ({ ...c }));
-    this.wallWeapons = (this.gameplay.wallWeapons ?? []).map(w => ({ ...w }));
+    this.groundWeapons = (this.gameplay.groundWeapons ?? []).map(w => ({ ...w }));
+    this.groundMags    = (this.gameplay.groundMags ?? []).map(m => ({ ...m }));
     this.lanes       = [...(this.gameplay.lanes ?? [])];
     this.lodibidonCenter = { ...this.gameplay.lodibidonCenter };
     this.lodibidonSpawns = {

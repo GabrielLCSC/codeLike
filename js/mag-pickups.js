@@ -1,62 +1,68 @@
 // ═══════════════════════════════════════════════════════════
-//  WARFRONT — Ground weapon pickups
+//  WARFRONT — Ground magazine pickups
 // ═══════════════════════════════════════════════════════════
 
 import * as THREE from 'three';
 import { WEAPONS } from './config.js';
-import { buildWeaponWorldModel } from './weapon.js';
+import { makeLabelTexture } from './weapon-pickups.js';
 
-/** Display labels for dropped / map weapons. */
-export const PICKUP_LABELS = {
-  ak47:          'AK47',
-  assault_rifle: 'AR',
-  shotgun:       'SG',
-  sniper:        'SR',
-  pistol:        'PI',
+export const MAG_LABELS = {
+  assault_rifle: 'MAG AR',
+  ak47:          'MAG AK',
+  shotgun:       'MAG SG',
+  sniper:        'MAG SR',
+  pistol:        'MAG PI',
 };
 
-/**
- * @param {string} weapon
- * @returns {string}
- */
-export function pickupLabelFor(weapon) {
-  return PICKUP_LABELS[weapon] ?? WEAPONS[weapon]?.name ?? weapon.toUpperCase();
+const HIGHLIGHT_COLOR = 0x3399ff;
+const HIGHLIGHT_GLOW  = 0x3399ff;
+
+/** @param {string} weapon */
+export function magLabelFor(weapon) {
+  return MAG_LABELS[weapon] ?? `MAG ${(WEAPONS[weapon]?.name ?? weapon).slice(0, 6).toUpperCase()}`;
 }
 
-/**
- * @param {string} label
- * @returns {THREE.CanvasTexture}
- */
-export function makeLabelTexture(label) {
-  const canvas = document.createElement('canvas');
-  canvas.width  = 256;
-  canvas.height = 96;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.font = 'bold 36px "Courier New", monospace';
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(label, canvas.width / 2, 40);
-  const metrics = ctx.measureText(label);
-  const x0 = canvas.width / 2 - metrics.width / 2;
-  const x1 = canvas.width / 2 + metrics.width / 2;
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(x0, 58);
-  ctx.lineTo(x1, 58);
-  ctx.stroke();
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+/** Magazine body size [w, h, d] per weapon type. */
+const MAG_SIZES = {
+  assault_rifle: [0.042, 0.088, 0.13],
+  ak47:          [0.038, 0.092, 0.12],
+  shotgun:       [0.052, 0.062, 0.15],
+  sniper:        [0.036, 0.072, 0.11],
+  pistol:        [0.03, 0.058, 0.055],
+};
+
+function buildMagMesh(weapon) {
+  const def = WEAPONS[weapon] ?? WEAPONS.assault_rifle;
+  const [w, h, d] = MAG_SIZES[weapon] ?? MAG_SIZES.assault_rifle;
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshLambertMaterial({ color: def.bodyColor });
+  const metalMat = new THREE.MeshLambertMaterial({ color: def.barrelColor });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bodyMat);
+  body.rotation.x = Math.PI / 2;
+  body.position.y = w * 0.5 + 0.02;
+  body.castShadow = true;
+  group.add(body);
+
+  const cap = new THREE.Mesh(new THREE.BoxGeometry(w * 0.92, 0.01, d * 0.88), metalMat);
+  cap.rotation.x = Math.PI / 2;
+  cap.position.y = w + 0.028;
+  group.add(cap);
+
+  if (weapon === 'ak47' || weapon === 'assault_rifle') {
+    const curve = new THREE.Mesh(new THREE.BoxGeometry(w * 0.85, h * 0.35, d * 0.7), bodyMat);
+    curve.rotation.x = Math.PI / 2;
+    curve.rotation.z = 0.22;
+    curve.position.set(0, w * 0.35, d * 0.08);
+    group.add(curve);
+  }
+
+  return group;
 }
 
-function buildPickupVisual(weapon, label) {
+function buildMagPickupVisual(weapon, label) {
   const root = new THREE.Group();
-
-  const gun = buildWeaponWorldModel(weapon);
-  root.add(gun);
+  root.add(buildMagMesh(weapon));
 
   const labelTex = makeLabelTexture(label);
   const labelMat = new THREE.MeshBasicMaterial({
@@ -65,28 +71,28 @@ function buildPickupVisual(weapon, label) {
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  const labelMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.22), labelMat);
-  labelMesh.position.set(0, 0.32, 0);
+  const labelMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.58, 0.2), labelMat);
+  labelMesh.position.set(0, 0.26, 0);
   labelMesh.rotation.x = -Math.PI / 2;
   labelMesh.userData.ignoreRaycast = true;
   root.add(labelMesh);
 
   const ringMat = new THREE.MeshBasicMaterial({
-    color: 0x00ff88,
+    color: HIGHLIGHT_COLOR,
     transparent: true,
     opacity: 0.55,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  const highlight = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.52, 32), ringMat);
+  const highlight = new THREE.Mesh(new THREE.RingGeometry(0.28, 0.36, 32), ringMat);
   highlight.rotation.x = -Math.PI / 2;
   highlight.position.y = 0.04;
   highlight.visible = false;
   highlight.userData.ignoreRaycast = true;
   root.add(highlight);
 
-  const glow = new THREE.PointLight(0x00ff88, 0, 3.5);
-  glow.position.set(0, 0.2, 0);
+  const glow = new THREE.PointLight(HIGHLIGHT_GLOW, 0, 3);
+  glow.position.set(0, 0.16, 0);
   root.add(glow);
 
   root.userData.highlight = highlight;
@@ -103,17 +109,15 @@ function buildPickupVisual(weapon, label) {
  *   rotY: number,
  *   kind: 'map'|'ground',
  *   taken: boolean,
- *   ammo?: number,
- *   reserve?: number,
  *   group: THREE.Group,
- * }} WeaponPickup
+ * }} MagPickup
  */
 
-export class WeaponPickupManager {
+export class MagPickupManager {
   /** @param {THREE.Scene} scene */
   constructor(scene) {
     this.scene = scene;
-    /** @type {Map<string, WeaponPickup>} */
+    /** @type {Map<string, MagPickup>} */
     this._pickups = new Map();
     /** @type {Set<string>} */
     this._highlightIds = new Set();
@@ -126,7 +130,7 @@ export class WeaponPickupManager {
       this._addPickup({
         id:     d.id,
         weapon: d.weapon,
-        label:  d.label ?? pickupLabelFor(d.weapon),
+        label:  d.label ?? magLabelFor(d.weapon),
         x:      d.x,
         y:      0.02,
         z:      d.z,
@@ -136,21 +140,17 @@ export class WeaponPickupManager {
     }
   }
 
-  /**
-   * @param {{ id: string, weapon: string, x: number, z: number, ammo?: number, reserve?: number, rotY?: number, label?: string }} opts
-   */
+  /** @param {{ id: string, weapon: string, x: number, z: number, rotY?: number, label?: string }} opts */
   spawnGround(opts) {
     this._addPickup({
       id:      opts.id,
       weapon:  opts.weapon,
-      label:   opts.label ?? pickupLabelFor(opts.weapon),
+      label:   opts.label ?? magLabelFor(opts.weapon),
       x:       opts.x,
       y:       0.02,
       z:       opts.z,
       rotY:    opts.rotY ?? Math.random() * Math.PI * 2,
       kind:    'ground',
-      ammo:    opts.ammo,
-      reserve: opts.reserve,
     });
   }
 
@@ -163,13 +163,19 @@ export class WeaponPickupManager {
     this._highlightIds.delete(id);
   }
 
-  /** @returns {WeaponPickup|null} */
-  findNearest(px, pz, radius) {
+  /**
+   * @param {number} px
+   * @param {number} pz
+   * @param {number} radius
+   * @param {(weapon: string) => boolean} canTake
+   * @returns {MagPickup|null}
+   */
+  findNearestTakable(px, pz, radius, canTake) {
     const r2 = radius * radius;
     let best = null;
     let bestD = Infinity;
     for (const p of this._pickups.values()) {
-      if (p.taken) continue;
+      if (p.taken || !canTake(p.weapon)) continue;
       const dx = px - p.x;
       const dz = pz - p.z;
       const d2 = dx * dx + dz * dz;
@@ -182,15 +188,16 @@ export class WeaponPickupManager {
   }
 
   /**
-   * Highlight every pickup visible from the player (any distance, blocked by walls).
+   * Blue highlight for visible mags the player can use (has weapon + reserve room).
    * @param {number} px
    * @param {number} pz
    * @param {{ hasLOS: (x1: number, z1: number, x2: number, z2: number) => boolean }|null} map
+   * @param {(weapon: string) => boolean} canTake
    */
-  updateHighlights(px, pz, map) {
+  updateHighlights(px, pz, map, canTake) {
     const next = new Set();
     for (const p of this._pickups.values()) {
-      if (p.taken) continue;
+      if (p.taken || !canTake(p.weapon)) continue;
       if (!map || map.hasLOS(px, pz, p.x, p.z)) next.add(p.id);
     }
     if (next.size === this._highlightIds.size) {
@@ -203,7 +210,7 @@ export class WeaponPickupManager {
     for (const p of this._pickups.values()) {
       const show = next.has(p.id);
       if (p.group.userData.highlight) p.group.userData.highlight.visible = show;
-      if (p.group.userData.glow) p.group.userData.glow.intensity = show ? 1.4 : 0;
+      if (p.group.userData.glow) p.group.userData.glow.intensity = show ? 1.3 : 0;
     }
     this._highlightIds = next;
   }
@@ -214,7 +221,7 @@ export class WeaponPickupManager {
     this._pulse += dt * 5;
     const s = 1 + Math.sin(this._pulse) * 0.08;
     const opacity = 0.45 + Math.sin(this._pulse * 1.4) * 0.22;
-    const glowI = 1.2 + Math.sin(this._pulse * 1.4) * 0.5;
+    const glowI = 1.1 + Math.sin(this._pulse * 1.4) * 0.45;
     for (const id of this._highlightIds) {
       const p = this._pickups.get(id);
       if (!p?.group.userData.highlight) continue;
@@ -224,7 +231,7 @@ export class WeaponPickupManager {
     }
   }
 
-  /** @param {string} id @returns {WeaponPickup|undefined} */
+  /** @param {string} id @returns {MagPickup|undefined} */
   get(id) { return this._pickups.get(id); }
 
   resetMapPickups() {
@@ -247,11 +254,11 @@ export class WeaponPickupManager {
 
   /** @private */
   _addPickup(def) {
-    const group = buildPickupVisual(def.weapon, def.label);
+    const group = buildMagPickupVisual(def.weapon, def.label);
     group.position.set(def.x, def.y, def.z);
     group.rotation.y = def.rotY;
     this.scene.add(group);
-    /** @type {WeaponPickup} */
+    /** @type {MagPickup} */
     const entry = { ...def, taken: false, group };
     this._pickups.set(def.id, entry);
   }

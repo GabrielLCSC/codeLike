@@ -11,7 +11,7 @@ import {
   PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
-  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WALL_WEAPON_RADIUS, DROPPABLE_WEAPONS, WEAPONS, BOT_COUNT, BOT_LEVELS, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
+  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WALL_WEAPON_RADIUS, MAG_PICKUP_RADIUS, MAG_WEAPON_TYPES, DROPPABLE_WEAPONS, WEAPONS, BOT_COUNT, BOT_LEVELS, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
   GRENADE_DAMAGE, GRENADE_RADIUS, GRENADE_MAX, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
   SYNC_INTERVAL, REMOTE_INTERP_SPEED, REMOTE_EXTRAP_S, REMOTE_SNAP_DIST,
   LODIBIDON_BOT_HIT_BONUS,
@@ -33,6 +33,7 @@ import { LodibidonController, yawToward, enemyTeam } from './lodibidon.js';
 import { ClassicMatchController } from './classic-match.js';
 import { DEFAULT_MAP_ID, getMapGameplay } from './maps/index.js';
 import { WeaponPickupManager, pickupLabelFor } from './weapon-pickups.js';
+import { MagPickupManager, magLabelFor } from './mag-pickups.js';
 
 export class Game {
   /**
@@ -88,8 +89,13 @@ export class Game {
     this._ammoChestReadyAt = 0;
     /** @type {WeaponPickupManager|null} */
     this.weaponPickups = null;
+    /** @type {MagPickupManager|null} */
+    this.magPickups = null;
     this._nearWeaponPickup = null;
+    this._nearMagPickup = null;
     this._pickupIdCounter = 0;
+    this._pointerLockEngaged = false;
+    this._lockAcquiredAt = 0;
 
     // ── Timing ────────────────────────────────────────────
     this.lastFrameMs      = performance.now();
@@ -155,6 +161,7 @@ export class Game {
     this._onWheel     = this._handleWheel.bind(this);
     this._onCtxMenu  = e => e.preventDefault();
     this._onResize   = this._handleResize.bind(this);
+    this._onCanvasPointerDown = this._handleCanvasPointerDown.bind(this);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -173,15 +180,21 @@ export class Game {
     this._classicMatchOverActive = false;
     this._lastClassicSyncMs = 0;
     this._pickupIdCounter = 0;
+    this._pointerLockEngaged = false;
+    this._lockAcquiredAt = 0;
     this.classicMatch = null;
     this._playerSpawnSlot = 0;
     this._initRenderer();
     this._initScene();
     this._initMap();
     this.weaponPickups = new WeaponPickupManager(this.scene);
-    this.weaponPickups.initWallPickups(this.map.wallWeapons);
-    this.weaponPickups.resetWallVisibility();
+    this.weaponPickups.initMapPickups(this.map.groundWeapons);
+    this.weaponPickups.resetMapPickups();
     this.weaponPickups.clearGround();
+    this.magPickups = new MagPickupManager(this.scene);
+    this.magPickups.initMapPickups(this.map.groundMags);
+    this.magPickups.resetMapPickups();
+    this.magPickups.clearGround();
     this.mapScanner = new MapScanner(this.map.width, this.map.height, MAP_SCAN_RADIUS);
 
     if (LodibidonController.isMode(this.opts)) {
@@ -215,9 +228,19 @@ export class Game {
     }
 
     this.hud.show();
-    document.getElementById('pointer-lock-overlay').classList.remove('hidden');
+    document.getElementById('pointer-lock-overlay').classList.add('hidden');
     this.running = true;
     this._loop();
+    this.tryPointerLock();
+  }
+
+  /** Request pointer lock (call from launch click or canvas mousedown). */
+  tryPointerLock() {
+    if (!this.controls || !this.running) return;
+    if (this._isLodibidonMatchOver() || this._isClassicMatchOver()) return;
+    if (!this.alive && !this.lodibidon?.spectating) return;
+    if (this.controls.isLocked) return;
+    this.controls.lock();
   }
 
   /** @param {{ leaveRoom?: boolean }} [opts] */
@@ -248,6 +271,7 @@ export class Game {
     if (leaveRoom) void this.mp?.leave();
     this.hud?.hide();
 
+    this._setPauseOverlayMode('pause');
     document.getElementById('pointer-lock-overlay').classList.add('hidden');
     document.getElementById('death-screen').classList.add('hidden');
     document.getElementById('lodibidon-match-over')?.classList.add('hidden');
@@ -264,6 +288,20 @@ export class Game {
     this.weapon.equip(key);
     this._applyADSState(false);
     this.mp?.updateWeapon(key);
+  }
+
+  /** @param {'pause'} mode */
+  _setPauseOverlayMode(mode) {
+    const plo = document.getElementById('pointer-lock-overlay');
+    const title = document.getElementById('plo-title');
+    const pauseContent = document.getElementById('plo-pause-content');
+    const controls = plo?.querySelector('.plo-controls');
+    if (!plo || mode !== 'pause') return;
+
+    plo.classList.remove('plo--click');
+    if (title) title.textContent = 'PAUSED';
+    pauseContent?.classList.remove('hidden');
+    controls?.classList.add('hidden');
   }
 
   /** Called from in-game pause panel. */
@@ -323,15 +361,12 @@ export class Game {
     this._pushLocalSpawnToNetwork();
 
     const plo = document.getElementById('pointer-lock-overlay');
-    plo.addEventListener('click', () => {
-      if (this._isLodibidonMatchOver() || this._isClassicMatchOver()) return;
-      if (this.running && (this.alive || this.lodibidon?.spectating)) this.controls.lock();
-    }, { capture: true });
+    this.renderer.domElement.addEventListener('mousedown', this._onCanvasPointerDown);
 
     this.controls.addEventListener('lock', () => {
+      this._pointerLockEngaged = true;
+      this._lockAcquiredAt = performance.now();
       plo.classList.add('hidden');
-      const title = document.getElementById('plo-title');
-      if (title) title.textContent = 'PAUSED';
       sound.init().then(() => sound.startAmbiance('city'));
     });
     this.controls.addEventListener('unlock', () => {
@@ -345,15 +380,27 @@ export class Game {
         return;
       }
       if (!this.alive) return;
+      if (!this._pointerLockEngaged) return;
+      if (performance.now() - this._lockAcquiredAt < 400) {
+        plo.classList.add('hidden');
+        return;
+      }
       // Tab releases pointer lock in some browsers — don't open pause/settings for that
       if (this._tabHeld) {
         plo.classList.add('hidden');
         return;
       }
+      this._setPauseOverlayMode('pause');
       plo.classList.remove('hidden');
     });
+  }
 
-    // Pointer lock needs a user gesture — overlay click handles it.
+  _handleCanvasPointerDown(e) {
+    if (e.button !== 0) return;
+    if (!this.running) return;
+    if (this._isLodibidonMatchOver() || this._isClassicMatchOver()) return;
+    if (!this.alive && !this.lodibidon?.spectating) return;
+    if (!this.controls?.isLocked) this.tryPointerLock();
   }
 
   _initSystems() {
@@ -372,11 +419,11 @@ export class Game {
     );
     this.weapon.onAmmoChanged    = () => this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve);
     this.weapon.onWeaponChanged  = name => this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve, name);
-    this.weapon.onSlotChanged    = slot => this.hud.setWeaponSlot(slot, this.weapon.hasPrimary);
+    this.weapon.onSlotChanged    = slot => this.hud.setWeaponSlot(slot, this.weapon.slotOccupancy());
     this.weapon.onReloadStart    = () => this.hud.showReloadBar(this.weapon.def.reloadTime);
     this.weapon.onReloadComplete = () => this.hud.hideReloadBar();
     this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve, this.weapon.def.name);
-    this.hud.setWeaponSlot(this.weapon.activeSlot, this.weapon.hasPrimary);
+    this.hud.setWeaponSlot(this.weapon.activeSlot, this.weapon.slotOccupancy());
 
     // Particles
     this.particles = new ParticleSystem(this.scene);
@@ -783,13 +830,13 @@ export class Game {
 
     // Host advances phase/timer; clients mirror via applyMatchState only.
     if (this._isMpClient()) {
-      setTimeout(() => { if (this.running && this.alive) this.controls.lock(); }, 150);
+      setTimeout(() => { if (this.running && this.alive) this.tryPointerLock(); }, 150);
       return;
     }
 
     this.lodibidon.startRound();
     this.mp?.syncMatch(this.lodibidon.buildMatchState());
-    setTimeout(() => { if (this.running && this.alive) this.controls.lock(); }, 150);
+    setTimeout(() => { if (this.running && this.alive) this.tryPointerLock(); }, 150);
   }
 
   _getBotCombatTarget(bot) {
@@ -1347,6 +1394,13 @@ export class Game {
       case 'weapon_ground_spawn':
         this._spawnGroundPickupFromNetwork(evt);
         break;
+      case 'mag_pickup_removed':
+        this.magPickups?.remove(evt.id);
+        if (this._nearMagPickup === evt.id) this._nearMagPickup = null;
+        break;
+      case 'mag_ground_spawn':
+        this._spawnGroundMagFromNetwork(evt);
+        break;
       default:
         break;
     }
@@ -1672,19 +1726,34 @@ export class Game {
     const px = this.camera.position.x;
     const pz = this.camera.position.z;
     const showHud = this.controls.isLocked;
+    const canTakeMag = w => this.weapon?.canUseMagPickup(w) ?? false;
 
     const nearPickup = this.weaponPickups?.findNearest(px, pz, WALL_WEAPON_RADIUS) ?? null;
     this._nearWeaponPickup = nearPickup?.id ?? null;
-    this.weaponPickups?.setHighlight(this._nearWeaponPickup);
+    this.weaponPickups?.updateHighlights(px, pz, this.map);
     this.weaponPickups?.updatePulse(delta);
+
+    const nearMag = this.magPickups?.findNearestTakable(px, pz, MAG_PICKUP_RADIUS, canTakeMag) ?? null;
+    this._nearMagPickup = nearMag?.id ?? null;
+    this.magPickups?.updateHighlights(px, pz, this.map, canTakeMag);
+    this.magPickups?.updatePulse(delta);
 
     if (nearPickup) {
       this.hud.showWallWeaponHint(showHud, nearPickup.label);
+      this.hud.showMagHint(false);
       this.hud.showAmmoChestHint(false);
       return;
     }
 
     this.hud.showWallWeaponHint(false);
+
+    if (nearMag) {
+      this.hud.showMagHint(showHud, nearMag.label);
+      this.hud.showAmmoChestHint(false);
+      return;
+    }
+
+    this.hud.showMagHint(false);
 
     const chests = this.map.ammoChests ?? [];
     let nearChest = false;
@@ -1741,14 +1810,43 @@ export class Game {
     });
   }
 
-  /** Drop current primary at world position (swap / G key). */
-  _dropPrimaryAt(x, z, syncId = null) {
+  _broadcastGroundMag(id, weapon, x, z) {
+    this.mp?.sendWorldEvent({
+      type:   'mag_ground_spawn',
+      id,
+      weapon,
+      x,
+      z,
+    });
+  }
+
+  _spawnGroundMag(x, z, weapon, id = null) {
+    if (!MAG_WEAPON_TYPES.has(weapon)) return null;
+    const pickupId = id ?? this._nextPickupId('mag');
+    this.magPickups?.spawnGround({
+      id: pickupId,
+      weapon,
+      x,
+      z,
+      label: magLabelFor(weapon),
+    });
+    return pickupId;
+  }
+
+  _spawnGroundMagFromNetwork(evt) {
+    if (this.magPickups?.get(evt.id)) return;
+    this._spawnGroundMag(evt.x, evt.z, evt.weapon, evt.id);
+  }
+
+  /** Drop active slot weapon at world position (swap / throw). */
+  _dropActiveAt(x, z, syncId = null) {
     const dropped = this.weapon.dropPrimary();
     if (!dropped || !DROPPABLE_WEAPONS.has(dropped.key)) return null;
     const id = this._spawnGroundPickup(x, z, dropped.key, dropped.ammo, dropped.reserve, syncId);
     if (id && !syncId) {
       this._broadcastGroundPickup(id, dropped.key, x, z, dropped.ammo, dropped.reserve);
     }
+    this.hud.setWeaponSlot(this.weapon.activeSlot, this.weapon.slotOccupancy());
     return id;
   }
 
@@ -1759,19 +1857,20 @@ export class Game {
 
     const dropX = pickup.x + (Math.random() - 0.5) * 0.6;
     const dropZ = pickup.z + (Math.random() - 0.5) * 0.6;
-    if (this.weapon.hasPrimary) {
-      this._dropPrimaryAt(dropX, dropZ);
+    const bothFull = this.weapon.hasSlot('primary') && this.weapon.hasSlot('side');
+    if (bothFull) {
+      this._dropActiveAt(dropX, dropZ);
     }
 
-    const ammoState = pickup.kind === 'ground'
+    const ammoState = pickup.kind === 'ground' || pickup.ammo != null
       ? { key: pickup.weapon, ammo: pickup.ammo ?? WEAPONS[pickup.weapon].magSize, reserve: pickup.reserve ?? 0 }
       : null;
 
-    this.weapon.pickupPrimary(pickup.weapon, ammoState);
+    this.weapon.pickupWeapon(pickup.weapon, ammoState);
     this._applyADSState(false);
     this.weaponPickups.remove(pickup.id);
     this._nearWeaponPickup = null;
-    this.hud.setWeaponSlot('primary', true);
+    this.hud.setWeaponSlot(this.weapon.activeSlot, this.weapon.slotOccupancy());
 
     this.mp?.updateWeapon(pickup.weapon);
     this.mp?.sendWorldEvent({ type: 'weapon_pickup_removed', id: pickup.id });
@@ -1779,8 +1878,44 @@ export class Game {
     return true;
   }
 
+  _tryTakeMagPickup() {
+    if (!this.alive || !this.controls.isLocked || !this._nearMagPickup) return false;
+    const pickup = this.magPickups?.get(this._nearMagPickup);
+    if (!pickup || pickup.taken) return false;
+    if (!this.weapon.canUseMagPickup(pickup.weapon)) return false;
+
+    if (!this.weapon.applyMagPickup(pickup.weapon)) return false;
+
+    this.magPickups.remove(pickup.id);
+    this._nearMagPickup = null;
+    this.mp?.sendWorldEvent({ type: 'mag_pickup_removed', id: pickup.id });
+    sound.play('ui_click', { volume: 0.55, pitch: 1.15 });
+    return true;
+  }
+
+  _tryDropMag() {
+    if (!this.alive || !this.controls.isLocked || this.weapon.isThrowing) return;
+    if (this.grenades?.isPrimed) return;
+    if (!this.weapon.canDropMag()) return;
+
+    const dropped = this.weapon.dropMagReserve();
+    if (!dropped) return;
+
+    this.camera.getWorldDirection(this._camDir);
+    this._camDir.y = 0;
+    if (this._camDir.lengthSq() < 0.001) this._camDir.set(0, 0, -1);
+    this._camDir.normalize();
+
+    const px = this.camera.position.x + this._camDir.x * 0.75;
+    const pz = this.camera.position.z + this._camDir.z * 0.75;
+    const id = this._spawnGroundMag(px, pz, dropped.weapon);
+    if (id) this._broadcastGroundMag(id, dropped.weapon, px, pz);
+    sound.play('ui_click', { volume: 0.45, pitch: 0.88 });
+  }
+
   _tryDropWeapon() {
-    if (!this.alive || !this.controls.isLocked || !this.weapon.hasPrimary) return;
+    if (!this.alive || !this.controls.isLocked || this.weapon.isThrowing) return;
+    if (!this.weapon.hasSlot(this.weapon.activeSlot)) return;
     if (this.grenades?.isPrimed) return;
 
     this.camera.getWorldDirection(this._camDir);
@@ -1788,16 +1923,25 @@ export class Game {
     if (this._camDir.lengthSq() < 0.001) this._camDir.set(0, 0, -1);
     this._camDir.normalize();
 
-    const px = this.camera.position.x + this._camDir.x * 0.85;
-    const pz = this.camera.position.z + this._camDir.z * 0.85;
-    if (this._dropPrimaryAt(px, pz)) {
-      this.hud.setWeaponSlot('side', false);
-      sound.play('ui_click', { volume: 0.5, pitch: 0.92 });
-    }
+    const landDist = 2.4;
+    const landX = this.camera.position.x + this._camDir.x * landDist;
+    const landZ = this.camera.position.z + this._camDir.z * landDist;
+
+    if (!this.weapon.beginThrow((dropped) => {
+      if (!dropped) return;
+      const id = this._spawnGroundPickup(landX, landZ, dropped.key, dropped.ammo, dropped.reserve);
+      if (id) {
+        this._broadcastGroundPickup(id, dropped.key, landX, landZ, dropped.ammo, dropped.reserve);
+      }
+      this.hud.setWeaponSlot(this.weapon.activeSlot, this.weapon.slotOccupancy());
+    })) return;
+
+    sound.play('ui_click', { volume: 0.5, pitch: 0.92 });
   }
 
   _tryInteractF() {
     if (this._tryTakeWeaponPickup()) return;
+    if (this._tryTakeMagPickup()) return;
     this._tryAmmoChestResupply();
   }
 
@@ -2141,7 +2285,7 @@ export class Game {
     this.hud.hideDeathScreen();
     this.mp?.updateHealth(100);
     this._pushLocalSpawnToNetwork();
-    setTimeout(() => this.controls.lock(), 100);
+    setTimeout(() => this.tryPointerLock(), 100);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -2319,6 +2463,7 @@ export class Game {
     document.removeEventListener('mouseup',    this._onMouseUp);
     document.removeEventListener('wheel',      this._onWheel, { passive: false });
     document.removeEventListener('contextmenu', this._onCtxMenu);
+    this.renderer?.domElement?.removeEventListener('mousedown', this._onCanvasPointerDown);
     window.removeEventListener('resize',       this._onResize);
   }
 
@@ -2339,14 +2484,15 @@ export class Game {
     if (e.code === 'KeyR') this.weapon.reload();
     if (e.code === 'KeyF') this._tryInteractF();
     if (e.code === 'KeyG' && !e.repeat) this._tryDropWeapon();
+    if (e.code === 'KeyV' && !e.repeat) this._tryDropMag();
     if (e.code === 'KeyE' && !e.repeat) this.grenades?.tryPrime();
     if (e.code === 'Digit1' || e.code === 'Numpad1') {
       e.preventDefault();
-      if (this.weapon.hasPrimary) this._switchWeaponSlot('primary');
+      if (this.weapon.hasSlot('primary')) this._switchWeaponSlot('primary');
     }
     if (e.code === 'Digit2' || e.code === 'Numpad2') {
       e.preventDefault();
-      this._switchWeaponSlot('side');
+      if (this.weapon.hasSlot('side')) this._switchWeaponSlot('side');
     }
   }
 
@@ -2360,7 +2506,7 @@ export class Game {
       this.hud.hideLeaderboard();
       document.getElementById('pointer-lock-overlay')?.classList.add('hidden');
       if (this.running && this.alive && !this.controls?.isLocked) {
-        this.controls?.lock();
+        this.tryPointerLock();
       }
       return;
     }
@@ -2407,15 +2553,15 @@ export class Game {
     const now = performance.now();
     if (now - this._lastScrollWeaponSwapMs < 500) return;
     this._lastScrollWeaponSwapMs = now;
-    const next = this.weapon.activeSlot === 'primary' || !this.weapon.hasPrimary
-      ? 'side'
-      : 'primary';
-    this._switchWeaponSlot(next);
+    const order = ['primary', 'side'];
+    const idx = order.indexOf(this.weapon.activeSlot);
+    const alt = order[(idx + 1) % 2];
+    if (this.weapon.hasSlot(alt)) this._switchWeaponSlot(alt);
   }
 
   /** @param {'primary'|'side'} slot */
   _switchWeaponSlot(slot) {
-    if (slot === 'primary' && !this.weapon.hasPrimary) return;
+    if (!this.weapon.hasSlot(slot)) return;
     this.weapon.switchToSlot(slot);
     this._applyADSState(false);
   }

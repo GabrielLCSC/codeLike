@@ -38,8 +38,10 @@ export const MAX_HEALTH = 100;
 
 /** World distance (XZ) to use an ammo chest. */
 export const AMMO_CHEST_RADIUS = 2.75;
-/** World distance (XZ) to take a wall-mounted weapon. */
+/** World distance (XZ) to take a wall-mounted weapon or ground pickup. */
 export const WALL_WEAPON_RADIUS = 2.5;
+/** World distance (XZ) to take a magazine pickup. */
+export const MAG_PICKUP_RADIUS = 2.5;
 /** Cooldown after resupplying at a chest (ms). */
 export const AMMO_CHEST_COOLDOWN_MS = 59000;
 
@@ -177,7 +179,10 @@ export const WEAPONS = {
 export const SIDE_WEAPON_KEY = 'pistol';
 
 /** Primary weapons that can be dropped / picked up in the world. */
-export const DROPPABLE_WEAPONS = new Set(['assault_rifle', 'ak47', 'shotgun', 'sniper']);
+export const DROPPABLE_WEAPONS = new Set(['assault_rifle', 'ak47', 'shotgun', 'sniper', 'pistol']);
+
+/** Weapon types that have magazine pickups in the world. */
+export const MAG_WEAPON_TYPES = new Set(['assault_rifle', 'ak47', 'shotgun', 'sniper', 'pistol']);
 
 // ─── BOT CONFIG (AI implementation: js/bots/) ─────────────────
 export const BOT_COUNT      = 3;

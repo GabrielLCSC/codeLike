@@ -8,7 +8,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import * as THREE  from 'three';
-import { WEAPONS, SIDE_WEAPON_KEY } from './config.js';
+import { WEAPONS, SIDE_WEAPON_KEY, DROPPABLE_WEAPONS } from './config.js';
 import { sound }   from './sound.js';
 
 // ── Weapon part tables ───────────────────────────────────────
@@ -196,6 +196,56 @@ const FLASH_OFFSET = {
   pistol:        new THREE.Vector3(0,  0.022, -0.128),
 };
 
+function _weaponMaterials(key) {
+  const wDef = WEAPONS[key] ?? WEAPONS.assault_rifle;
+  return {
+    body:  new THREE.MeshLambertMaterial({ color: wDef.bodyColor }),
+    metal: new THREE.MeshLambertMaterial({ color: wDef.barrelColor }),
+    stock: new THREE.MeshLambertMaterial({ color: wDef.stockColor ?? wDef.bodyColor }),
+    scope: new THREE.MeshLambertMaterial({ color: wDef.scopeColor ?? 0x111114 }),
+  };
+}
+
+function _assembleWeaponParts(key, mats) {
+  const group = new THREE.Group();
+  const parts = GUN_PARTS[key] ?? GUN_PARTS.assault_rifle;
+  parts.forEach(([shape, matKey, params, pos, rot]) => {
+    let geo;
+    if (shape === 'box') {
+      geo = new THREE.BoxGeometry(...params);
+    } else {
+      geo = new THREE.CylinderGeometry(...params);
+    }
+    const mesh = new THREE.Mesh(geo, mats[matKey] ?? mats.body);
+    mesh.position.set(...pos);
+    if (rot) {
+      mesh.rotation.set(...rot);
+    } else if (shape === 'cyl') {
+      mesh.rotation.x = Math.PI / 2;
+    }
+    mesh.castShadow = true;
+    group.add(mesh);
+  });
+  return group;
+}
+
+/** Same gun geometry as the first-person viewmodel, oriented flat for ground pickups. */
+export function buildWeaponWorldModel(key) {
+  const gun = _assembleWeaponParts(key, _weaponMaterials(key));
+  const root = new THREE.Group();
+  // Viewmodel barrel points -Z; lay flat on XZ with barrel horizontal.
+  gun.rotation.order = 'YXZ';
+  gun.rotation.y = Math.PI / 2;
+  gun.rotation.x = Math.PI / 2;
+  root.add(gun);
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(gun);
+  gun.position.y = -box.min.y + 0.04;
+  return root;
+}
+
+const THROW_DURATION = 0.42;
+
 // Rest position of the weapon group in camera space (combat — crosshair unchanged)
 const REST_POS = new THREE.Vector3(0.22, -0.28, -0.46);
 
@@ -215,16 +265,9 @@ export class WeaponSystem {
     this._baseFov = baseFov;
     this._adsMode = adsMode;
 
-    // ── Dual-slot weapon state ───────────────────────────
-    this._primaryKey = initialKey;
-    this._loadoutKey = initialKey;
-    this._sideKey    = SIDE_WEAPON_KEY;
-    /** @type {'primary'|'side'} */
+    // ── Dual independent weapon slots ────────────────────
     this._activeSlot = 'primary';
-    this._states = {
-      primary: this._freshSlotState(initialKey),
-      side:    this._freshSlotState(SIDE_WEAPON_KEY),
-    };
+    this._initDefaultSlots(initialKey);
 
     this.reloading = false;
     this.isADS    = false;
@@ -245,6 +288,12 @@ export class WeaponSystem {
     this._walkPhase    = 0;
     this._sprintPhase  = 0;
     this._viewSuppressed = false;
+    this._throwAnimOn    = false;
+    this._throwAnimT     = 0;
+    /** @type {(() => void)|null} */
+    this._throwCallback  = null;
+    /** @type {{ key: string, ammo: number, reserve: number }|null} */
+    this._throwPending   = null;
 
     // ── 3-D objects ────────────────────────────────────────
     /** @type {THREE.Group} */  this.group  = null;
@@ -270,15 +319,104 @@ export class WeaponSystem {
 
   // ── Active slot accessors ──────────────────────────────────
 
-  get key()     { return this._states[this._activeSlot].key; }
-  get def()     { return WEAPONS[this.key]; }
-  get ammo()    { return this._states[this._activeSlot].ammo; }
-  set ammo(v)   { this._states[this._activeSlot].ammo = v; }
-  get reserve() { return this._states[this._activeSlot].reserve; }
-  set reserve(v){ this._states[this._activeSlot].reserve = v; }
-  get primaryKey() { return this._primaryKey; }
+  get key()     { return this._slotKeys[this._activeSlot]; }
+  get def()     { return WEAPONS[this.key] ?? WEAPONS.pistol; }
+  get ammo()    { return this.hasSlot(this._activeSlot) ? this._states[this._activeSlot].ammo : 0; }
+  set ammo(v)   { if (this.hasSlot(this._activeSlot)) this._states[this._activeSlot].ammo = v; }
+  get reserve() { return this.hasSlot(this._activeSlot) ? this._states[this._activeSlot].reserve : 0; }
+  set reserve(v){ if (this.hasSlot(this._activeSlot)) this._states[this._activeSlot].reserve = v; }
+  get primaryKey() { return this._slotKeys.primary; }
   get activeSlot() { return this._activeSlot; }
-  get hasPrimary() { return this._primaryKey != null; }
+  get hasPrimary() { return this._slotKeys.primary != null; }
+  get hasSide()    { return this._slotKeys.side != null; }
+  get isThrowing() { return this._throwAnimOn; }
+
+  /** @param {'primary'|'side'} slot */
+  hasSlot(slot) { return this._slotKeys[slot] != null; }
+
+  /** True if either slot currently holds this weapon type. */
+  hasWeaponType(weaponKey) {
+    return this._slotKeys.primary === weaponKey || this._slotKeys.side === weaponKey;
+  }
+
+  /** True if a mag pickup can be applied (have weapon + reserve not full). */
+  canUseMagPickup(weaponKey) {
+    if (!WEAPONS[weaponKey] || !this.hasWeaponType(weaponKey)) return false;
+    for (const slot of ['primary', 'side']) {
+      if (this._slotKeys[slot] !== weaponKey) continue;
+      const d  = WEAPONS[weaponKey];
+      const st = this._states[slot];
+      if (st.reserve < d.reserve) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Add one magazine worth of reserve to every slot carrying this weapon.
+   * @returns {boolean}
+   */
+  applyMagPickup(weaponKey) {
+    if (!this.canUseMagPickup(weaponKey)) return false;
+    const magSize = WEAPONS[weaponKey].magSize;
+    let changed = false;
+    for (const slot of ['primary', 'side']) {
+      if (this._slotKeys[slot] !== weaponKey) continue;
+      const d  = WEAPONS[weaponKey];
+      const st = this._states[slot];
+      const before = st.reserve;
+      st.reserve = Math.min(d.reserve, st.reserve + magSize);
+      if (st.reserve !== before) changed = true;
+    }
+    if (changed) this.onAmmoChanged?.();
+    return changed;
+  }
+
+  /** Active weapon has enough reserve to drop one full magazine. */
+  canDropMag() {
+    const key = this.key;
+    if (!key || !WEAPONS[key]) return false;
+    return this.reserve >= WEAPONS[key].magSize;
+  }
+
+  /**
+   * Remove one mag from active slot reserve for dropping in the world.
+   * @returns {{ weapon: string }|null}
+   */
+  dropMagReserve() {
+    if (!this.canDropMag()) return null;
+    const key = this.key;
+    this._states[this._activeSlot].reserve -= WEAPONS[key].magSize;
+    this.onAmmoChanged?.();
+    return { weapon: key };
+  }
+
+  slotOccupancy() {
+    return {
+      primary: this.hasSlot('primary'),
+      side:    this.hasSlot('side'),
+    };
+  }
+
+  /** @param {string} initialKey */
+  _initDefaultSlots(initialKey) {
+    const loadout = WEAPONS[initialKey] ? initialKey : 'assault_rifle';
+    this._loadoutKey = loadout;
+    /** @type {{ primary: string|null, side: string|null }} */
+    this._slotKeys = { primary: loadout, side: null };
+    this._states = {
+      primary: this._freshSlotState(loadout),
+      side:    this._freshSlotState(SIDE_WEAPON_KEY),
+    };
+    this._ensureSidearm();
+  }
+
+  /** Slot 2 always starts with the default sidearm (pistol). */
+  _ensureSidearm() {
+    this._slotKeys.side = SIDE_WEAPON_KEY;
+    if (!this._states.side || this._states.side.key !== SIDE_WEAPON_KEY) {
+      this._states.side = this._freshSlotState(SIDE_WEAPON_KEY);
+    }
+  }
 
   _freshSlotState(key) {
     const d = WEAPONS[key];
@@ -293,21 +431,21 @@ export class WeaponSystem {
 
   /** True if any slot is below full ammo/reserve. */
   needsResupply() {
-    if (this._primaryKey) {
-      const st = this._states.primary;
+    for (const slot of ['primary', 'side']) {
+      if (!this._slotKeys[slot]) continue;
+      const st = this._states[slot];
       const d  = WEAPONS[st.key];
       if (st.ammo < d.magSize || st.reserve < d.reserve) return true;
     }
-    const st = this._states.side;
-    const d  = WEAPONS[st.key];
-    return st.ammo < d.magSize || st.reserve < d.reserve;
+    return false;
   }
 
-  /** Swap between loadout primary (1) and side pistol (2). */
+  /** Swap between slot 1 and slot 2. */
   switchToSlot(slot) {
     if (slot !== 'primary' && slot !== 'side') return;
-    if (slot === 'primary' && !this._primaryKey) return;
+    if (!this._slotKeys[slot]) return;
     if (slot === this._activeSlot) return;
+    if (this._throwAnimOn) return;
     this._cancelReload();
     this._activeSlot = slot;
     this.setADS(false);
@@ -331,7 +469,9 @@ export class WeaponSystem {
 
   /** True when the weapon can fire right now. */
   canFire(nowMs) {
-    return !this.reloading
+    return this.hasSlot(this._activeSlot)
+        && !this._throwAnimOn
+        && !this.reloading
         && this.ammo > 0
         && nowMs - this._lastShotMs >= this.fireInterval;
   }
@@ -376,16 +516,17 @@ export class WeaponSystem {
   /** Full mag + full reserve for every slot (ammo chest / resupply). */
   refillAmmo() {
     this._cancelReload();
-    if (this._primaryKey) {
-      this._states.primary = this._freshSlotState(this._primaryKey);
+    for (const slot of ['primary', 'side']) {
+      if (this._slotKeys[slot]) {
+        this._states[slot] = this._freshSlotState(this._slotKeys[slot]);
+      }
     }
-    this._states.side = this._freshSlotState(this._sideKey);
     this.onReloadComplete?.();
     this.onAmmoChanged?.();
   }
 
   reload() {
-    if (this.reloading || this.ammo === this.def.magSize || this.reserve === 0) return;
+    if (this._throwAnimOn || this.reloading || this.ammo === this.def.magSize || this.reserve === 0) return;
     this.reloading     = true;
     this._reloadAnimT  = 0;
     this._reloadAnimOn = true;
@@ -404,12 +545,14 @@ export class WeaponSystem {
     }, this.def.reloadTime);
   }
 
-  /** Swap primary loadout weapon; keeps sidearm state. */
+  /** Swap loadout weapon in slot 1 (lobby selection). */
   equip(key) {
-    if (!WEAPONS[key] || key === SIDE_WEAPON_KEY) return;
+    if (!WEAPONS[key]) return;
     this._cancelReload();
-    this._primaryKey = key;
+    this._loadoutKey = key;
+    this._slotKeys.primary = key;
     this._states.primary = this._freshSlotState(key);
+    this._ensureSidearm();
     if (this._activeSlot === 'primary') {
       this.setADS(false);
       this._sprintBlend = 0;
@@ -420,68 +563,120 @@ export class WeaponSystem {
     }
   }
 
-  /** Pick up a world / wall weapon — full mag unless ammoState provided. */
-  pickupPrimary(key, ammoState = null) {
-    if (!WEAPONS[key] || key === SIDE_WEAPON_KEY) return;
+  /**
+   * Pick up a world weapon — fills the first empty slot, otherwise replaces the active slot.
+   * @returns {'primary'|'side'|null}
+   */
+  pickupWeapon(key, ammoState = null) {
+    if (!WEAPONS[key]) return null;
+    const slot = this._findEmptySlot() ?? this._activeSlot;
     this._cancelReload();
-    this._primaryKey = key;
-    this._activeSlot = 'primary';
-    this._states.primary = ammoState ?? this._freshSlotState(key);
+    this._slotKeys[slot] = key;
+    this._states[slot] = ammoState ?? this._freshSlotState(key);
+    this._activeSlot = slot;
     this.setADS(false);
     this._sprintBlend = 0;
     this._buildModel(key);
     this.onReloadComplete?.();
     this.onAmmoChanged?.();
     this.onWeaponChanged?.(this.def.name);
-    this.onSlotChanged?.('primary');
+    this.onSlotChanged?.(slot);
+    return slot;
+  }
+
+  /** @returns {'primary'|'side'|null} */
+  _findEmptySlot() {
+    if (!this.hasSlot('primary')) return 'primary';
+    if (!this.hasSlot('side')) return 'side';
+    return null;
+  }
+
+  /** @deprecated use pickupWeapon */
+  pickupPrimary(key, ammoState = null) {
+    return this.pickupWeapon(key, ammoState);
   }
 
   /**
-   * Drop primary weapon — returns state for world pickup, switches to pistol.
+   * Drop weapon from the active slot.
    * @returns {{ key: string, ammo: number, reserve: number }|null}
    */
   dropPrimary() {
-    if (!this._primaryKey) return null;
+    return this._dropFromSlot(this._activeSlot);
+  }
+
+  /** @param {'primary'|'side'} slot */
+  _dropFromSlot(slot) {
+    const key = this._slotKeys[slot];
+    if (!key || !DROPPABLE_WEAPONS.has(key)) return null;
     const state = {
-      key:     this._primaryKey,
-      ammo:    this._states.primary.ammo,
-      reserve: this._states.primary.reserve,
+      key,
+      ammo:    this._states[slot].ammo,
+      reserve: this._states[slot].reserve,
     };
     this._cancelReload();
-    this._primaryKey = null;
-    if (this._activeSlot === 'primary') {
-      this._activeSlot = 'side';
-      this.setADS(false);
-      this._sprintBlend = 0;
-      this._buildModel(this.key);
-      this.onReloadComplete?.();
-      this.onAmmoChanged?.();
-      this.onWeaponChanged?.(this.def.name);
-      this.onSlotChanged?.('side');
+    this._slotKeys[slot] = null;
+    if (slot === this._activeSlot) {
+      const other = slot === 'primary' ? 'side' : 'primary';
+      if (this._slotKeys[other]) {
+        this._activeSlot = other;
+        this.setADS(false);
+        this._sprintBlend = 0;
+        this._buildModel(this.key);
+        this.onReloadComplete?.();
+        this.onAmmoChanged?.();
+        this.onWeaponChanged?.(this.def.name);
+        this.onSlotChanged?.(this._activeSlot);
+      } else if (this.group) {
+        this.group.visible = false;
+      }
     }
     return state;
   }
 
+  /**
+   * Play throw animation, then invoke callback with dropped weapon state.
+   * @param {(state: { key: string, ammo: number, reserve: number }) => void} onComplete
+   * @returns {boolean}
+   */
+  beginThrow(onComplete) {
+    if (this._throwAnimOn) return false;
+    const slot = this._activeSlot;
+    const key  = this._slotKeys[slot];
+    if (!key || !DROPPABLE_WEAPONS.has(key)) return false;
+    this._cancelReload();
+    this._throwPending = {
+      key,
+      ammo:    this._states[slot].ammo,
+      reserve: this._states[slot].reserve,
+    };
+    this._throwAnimT    = 0;
+    this._throwAnimOn   = true;
+    this._throwCallback = onComplete;
+    return true;
+  }
+
   /** @returns {{ key: string, ammo: number, reserve: number }|null} */
   getPrimaryState() {
-    if (!this._primaryKey) return null;
+    if (!this._slotKeys.primary) return null;
     return {
-      key:     this._primaryKey,
+      key:     this._slotKeys.primary,
       ammo:    this._states.primary.ammo,
       reserve: this._states.primary.reserve,
     };
   }
 
-  /** Reset both slots to full (respawn / round reset). */
+  /** Reset both slots to loadout + sidearm (respawn / round reset). */
   resetAll() {
     this._cancelReload();
-    this._primaryKey = this._loadoutKey;
+    this._throwAnimOn   = false;
+    this._throwPending  = null;
+    this._throwCallback = null;
     this._activeSlot = 'primary';
-    this._states.primary = this._freshSlotState(this._loadoutKey);
-    this._states.side    = this._freshSlotState(this._sideKey);
+    this._initDefaultSlots(this._loadoutKey);
     this.setADS(false);
     this._sprintBlend = 0;
     this._buildModel(this.key);
+    if (this.group) this.group.visible = !this._viewSuppressed;
     this.onReloadComplete?.();
     this.onAmmoChanged?.();
     this.onWeaponChanged?.(this.def.name);
@@ -520,6 +715,47 @@ export class WeaponSystem {
     if (Math.abs(this._camera.fov - this.targetFov) > 0.3) {
       this._camera.fov = THREE.MathUtils.lerp(this._camera.fov, this.targetFov, 0.18);
       this._camera.updateProjectionMatrix();
+    }
+
+    if (this._throwAnimOn) {
+      this._throwAnimT += delta;
+      const t = Math.min(this._throwAnimT / THROW_DURATION, 1);
+      const e = 1 - (1 - t) * (1 - t);
+      if (this.group) {
+        this.group.position.set(
+          REST_POS.x + e * 0.38,
+          REST_POS.y + Math.sin(t * Math.PI) * 0.22 - e * 0.08,
+          REST_POS.z - e * 0.72,
+        );
+        this.group.rotation.set(-e * 2.1, e * 0.65, e * 0.42);
+        this.group.visible = !this._viewSuppressed;
+      }
+      if (t >= 1) {
+        const pending = this._throwPending;
+        const cb      = this._throwCallback;
+        this._throwAnimOn   = false;
+        this._throwPending  = null;
+        this._throwCallback = null;
+        const slot = this._activeSlot;
+        this._slotKeys[slot] = null;
+        const other = slot === 'primary' ? 'side' : 'primary';
+        if (this.group) {
+          this.group.position.copy(REST_POS);
+          this.group.rotation.set(0, 0, 0);
+        }
+        if (this._slotKeys[other]) {
+          this._activeSlot = other;
+          this._buildModel(this.key);
+          this.onReloadComplete?.();
+          this.onAmmoChanged?.();
+          this.onWeaponChanged?.(this.def.name);
+          this.onSlotChanged?.(this._activeSlot);
+        } else if (this.group) {
+          this.group.visible = false;
+        }
+        cb?.(pending);
+      }
+      return;
     }
 
     // Model recoil decay
@@ -610,35 +846,8 @@ export class WeaponSystem {
     }
 
     const wDef = WEAPONS[key];
-
-    // One shared material instance per slot — disposed with the group above
-    const MATS = {
-      body:  new THREE.MeshLambertMaterial({ color: wDef.bodyColor }),
-      metal: new THREE.MeshLambertMaterial({ color: wDef.barrelColor }),
-      stock: new THREE.MeshLambertMaterial({ color: wDef.stockColor  ?? wDef.bodyColor }),
-      scope: new THREE.MeshLambertMaterial({ color: wDef.scopeColor  ?? 0x111114 }),
-    };
-
-    const group = new THREE.Group();
-    const parts = GUN_PARTS[key] ?? GUN_PARTS.assault_rifle;
-
-    parts.forEach(([shape, matKey, params, pos, rot]) => {
-      let geo;
-      if (shape === 'box') {
-        geo = new THREE.BoxGeometry(...params);
-      } else {
-        // 'cyl' — CylinderGeometry, default axis is Y; rotate X=π/2 to point along Z
-        geo = new THREE.CylinderGeometry(...params);
-      }
-      const mesh = new THREE.Mesh(geo, MATS[matKey] ?? MATS.body);
-      mesh.position.set(...pos);
-      if (rot) {
-        mesh.rotation.set(...rot);
-      } else if (shape === 'cyl') {
-        mesh.rotation.x = Math.PI / 2;
-      }
-      group.add(mesh);
-    });
+    const MATS = _weaponMaterials(key);
+    const group = _assembleWeaponParts(key, MATS);
 
     // Muzzle flash positioned at the bore axis tip for this weapon
     const flashPos = FLASH_OFFSET[key] ?? FLASH_OFFSET.assault_rifle;
@@ -648,6 +857,7 @@ export class WeaponSystem {
     group.add(this._flash);
 
     group.position.copy(REST_POS);
+    group.visible = !this._viewSuppressed;
     this._camera.add(group);
     this.group = group;
   }

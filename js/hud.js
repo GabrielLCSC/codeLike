@@ -136,23 +136,31 @@ export class HUD {
     el.innerHTML = `<span class="ammo-hint-key">F</span> Take weapon <span class="wall-weapon-label">${label}</span>`;
   }
 
+  /** @param {boolean} show @param {string} [label] */
+  showMagHint(show, label = 'MAG') {
+    const el = $('hud-mag-hint');
+    if (!el) return;
+    if (!show) {
+      el.classList.add('hidden');
+      return;
+    }
+    el.classList.remove('hidden');
+    el.innerHTML = `<span class="ammo-hint-key">F</span> Take magazine <span class="mag-pickup-label">${label}</span>`;
+  }
+
   setAmmo(mag, reserve, name) {
     $('hud-ammo-mag').textContent     = mag;
     $('hud-ammo-reserve').textContent = reserve;
     if (name !== undefined) $('hud-weapon-name').textContent = name;
   }
 
-  /** @param {'primary'|'side'} slot @param {boolean} [hasPrimary=true] */
-  setWeaponSlot(slot, hasPrimary = true) {
+  /** @param {'primary'|'side'} slot @param {{ primary?: boolean, side?: boolean }} [occupancy] */
+  setWeaponSlot(slot, occupancy = { primary: true, side: true }) {
     document.querySelectorAll('.weapon-slot').forEach(el => {
-      const isPrimary = el.dataset.slot === 'primary';
-      if (isPrimary && !hasPrimary) {
-        el.classList.remove('active');
-        el.classList.add('disabled');
-        return;
-      }
-      el.classList.remove('disabled');
-      el.classList.toggle('active', el.dataset.slot === slot);
+      const key = el.dataset.slot;
+      const hasWeapon = occupancy[key] !== false;
+      el.classList.toggle('disabled', !hasWeapon);
+      el.classList.toggle('active', hasWeapon && el.dataset.slot === slot);
     });
   }
 

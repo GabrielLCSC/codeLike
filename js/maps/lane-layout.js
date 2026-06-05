@@ -76,26 +76,65 @@ export function standardAmmoChests() {
   ];
 }
 
-/** Wall-mounted pickups — unique AK47 spawns. */
-export function standardWallWeapons() {
+/** Ground weapon pickups — unique AK47 spawns in side lanes. */
+export function standardGroundWeapons() {
   return [
     {
-      id:     'wall-ak-left',
-      x:      wx(GX_L2) - 1.15,
-      y:      1.48,
+      id:     'ground-ak-left',
+      x:      wx(GX_L2) - 0.8,
       z:      W_LANE_Z - 5,
-      rotY:   -Math.PI / 2,
+      rotY:   Math.PI / 2,
       weapon: 'ak47',
       label:  'AK47',
     },
     {
-      id:     'wall-ak-right',
-      x:      wx(GX_R1) + 1.15,
-      y:      1.48,
+      id:     'ground-ak-right',
+      x:      wx(GX_R1) + 0.8,
       z:      W_LANE_Z + 5,
-      rotY:   Math.PI / 2,
+      rotY:   -Math.PI / 2,
       weapon: 'ak47',
       label:  'AK47',
+    },
+  ];
+}
+
+/** Ground magazine pickups — one per weapon family in side/mid lanes. */
+export function standardGroundMags() {
+  return [
+    {
+      id:     'mag-ar-mid',
+      weapon: 'assault_rifle',
+      x:      W_MID_X - 1.2,
+      z:      W_LANE_Z,
+      rotY:   0,
+    },
+    {
+      id:     'mag-ak-left',
+      weapon: 'ak47',
+      x:      wx(GX_L2) - 0.5,
+      z:      W_LANE_Z - 2,
+      rotY:   Math.PI / 4,
+    },
+    {
+      id:     'mag-sg-right',
+      weapon: 'shotgun',
+      x:      wx(GX_R1) + 0.5,
+      z:      W_LANE_Z + 2,
+      rotY:   -Math.PI / 4,
+    },
+    {
+      id:     'mag-sr-mid',
+      weapon: 'sniper',
+      x:      W_MID_X + 1.2,
+      z:      W_LANE_Z - 3,
+      rotY:   Math.PI,
+    },
+    {
+      id:     'mag-pi-mid',
+      weapon: 'pistol',
+      x:      W_MID_X,
+      z:      W_LANE_Z + 4,
+      rotY:   0,
     },
   ];
 }
@@ -169,7 +208,8 @@ export function makeTriLaneMap(overrides = {}) {
     doors:       standardDoors(),
     spawnPoints: standardSpawnPoints(),
     ammoChests:  standardAmmoChests(),
-    wallWeapons: standardWallWeapons(),
+    groundWeapons: standardGroundWeapons(),
+    groundMags:    standardGroundMags(),
     lanes:       standardLanes(),
     lodibidonCenter: lod.center,
     lodibidonSpawns: lod.spawns,

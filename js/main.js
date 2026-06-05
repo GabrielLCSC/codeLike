@@ -5,33 +5,50 @@
 import { Game }               from './game.js';
 import { MultiplayerManager } from './multiplayer.js';
 import { sound }              from './sound.js';
-import { auth }                 from './auth.js';
+import { auth, USER_SETTINGS_DEFAULTS } from './auth.js';
 import { MAP_CATALOG, getMapGameplay } from './maps/index.js';
 
-// ─── SETTINGS (persisted in localStorage) ───────────────
-const DEFAULTS = {
-  sensitivity: 2.0,
-  fov:         75,
-  volume:      1.0,
-  weapon:      'assault_rifle',
-  adsMode:     'toggle',   // 'toggle' | 'hold'
-  botCount:    3,
-  botLevel:    'corporal', // 'private' | 'corporal' | 'commando' | 'veteran'
-  team:        'alpha',    // lodibidon: 'alpha' | 'omega'
-  gameType:    'ffa',      // 'ffa' | 'lodibidon'
-  mapId:       'city',
-};
+// ─── SETTINGS (local cache + Firebase per user) ───────────
+const DEFAULTS = USER_SETTINGS_DEFAULTS;
 
-function loadSettings() {
+function loadSettingsLocal() {
   try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('wf_settings') || '{}') }; }
   catch { return { ...DEFAULTS }; }
 }
+
+function settingsForStorage(s) {
+  const { username, ...prefs } = s;
+  return prefs;
+}
+
 function saveSettings(s) {
   localStorage.setItem('wf_settings', JSON.stringify(s));
+  if (auth.isLoggedIn) {
+    auth.saveUserSettings(settingsForStorage(s)).catch(err => {
+      console.warn('[Settings] Could not save to database:', err);
+    });
+  }
+}
+
+async function refreshSettingsFromDb() {
+  if (!auth.isLoggedIn) {
+    settings = loadSettingsLocal();
+    return settings;
+  }
+  try {
+    const dbPrefs = await auth.loadUserSettings();
+    settings = { ...dbPrefs, username: auth.displayName };
+    localStorage.setItem('wf_settings', JSON.stringify(settings));
+  } catch (err) {
+    console.warn('[Settings] Could not load from database, using local cache:', err);
+    settings = loadSettingsLocal();
+    settings.username = auth.displayName;
+  }
+  return settings;
 }
 
 // ─── STATE ───────────────────────────────────────────────
-let settings = loadSettings();
+let settings = loadSettingsLocal();
 let activeGame = null;
 let mp = null;
 let pendingMode = null;     // 'solo' | 'multi' — transport
@@ -79,6 +96,7 @@ function setupGunCards() {
       document.querySelectorAll('.gun-card').forEach(c => c.classList.remove('selected'));
       card.classList.add('selected');
       settings.weapon = card.dataset.gun;
+      saveSettings(settings);
     });
   });
 }
@@ -107,6 +125,17 @@ function setupMapCards() {
 
 function getMapLabel(mapId) {
   return getMapGameplay(mapId).meta.name ?? mapId;
+}
+
+function updateBotCountUI() {
+  const el = document.getElementById('lbl-bot-count');
+  if (el) el.textContent = settings.botCount === 0 ? 'OFF' : settings.botCount;
+}
+
+function applyDiffToUI() {
+  document.querySelectorAll('.diff-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.diff === settings.botLevel);
+  });
 }
 
 // ─── GAME LAUNCHER ───────────────────────────────────────
@@ -140,10 +169,16 @@ function showAuth() {
   showScreen('screen-auth');
 }
 
-function showAppMenu() {
+async function showAppMenu() {
   document.getElementById('auth-overlay').style.display = 'none';
   document.getElementById('menu-overlay').style.display = '';
+  await refreshSettingsFromDb();
   syncUsernameFromAuth();
+  applySettingsToUI();
+  setupGunCards();
+  setupMapCards();
+  updateBotCountUI();
+  applyDiffToUI();
   const lbl = document.getElementById('lbl-menu-user');
   if (lbl) lbl.textContent = auth.displayName;
   showScreen('screen-main');
@@ -195,26 +230,9 @@ function clearAuthError() {
 
 function launchGame(mode, mpInstance = null) {
   document.getElementById('menu-overlay').style.display = 'none';
-
-  // Loading splash
-  const loadScr = document.getElementById('loading-screen');
-  loadScr.classList.remove('hidden');
-  document.getElementById('loading-fill').style.width = '0%';
-
-  // Give UI time to render, then build map (synchronous but heavy)
-  requestAnimationFrame(() => {
-    document.getElementById('loading-fill').style.width = '40%';
-    setTimeout(() => {
-      document.getElementById('loading-fill').style.width = '80%';
-      setTimeout(() => {
-        document.getElementById('loading-fill').style.width = '100%';
-        setTimeout(() => {
-          loadScr.classList.add('hidden');
-          _startGame(mode, mpInstance);
-        }, 200);
-      }, 300);
-    }, 200);
-  });
+  document.getElementById('loading-screen')?.classList.add('hidden');
+  _startGame(mode, mpInstance);
+  activeGame?.tryPointerLock();
 }
 
 function _startGame(mode, mpInstance) {
@@ -394,8 +412,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Auth ─────────────────────────────────────────────
-  auth.init().then(() => {
-    if (auth.isLoggedIn) showAppMenu();
+  auth.init().then(async () => {
+    if (auth.isLoggedIn) await showAppMenu();
     else showAuth();
   }).catch(e => {
     showAuthError(e.message || 'Firebase failed to load. Check firebase-config.js');
@@ -414,7 +432,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('inp-login-pseudo').value,
         document.getElementById('inp-login-password').value,
       );
-      showAppMenu();
+      await showAppMenu();
     } catch (err) {
       showAuthError(err.message || 'Login failed.');
     } finally {
@@ -437,7 +455,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('inp-signup-pseudo').value,
         p1,
       );
-      showAppMenu();
+      await showAppMenu();
     } catch (err) {
       showAuthError(err.message || 'Sign up failed.');
     } finally {
@@ -446,10 +464,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Bot count stepper ────────────────────────────────
-  function updateBotCountUI() {
-    document.getElementById('lbl-bot-count').textContent =
-      settings.botCount === 0 ? 'OFF' : settings.botCount;
-  }
   updateBotCountUI();
 
   document.getElementById('btn-bots-minus').addEventListener('click', e => {
@@ -462,11 +476,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Bot difficulty selector ───────────────────────────
-  function applyDiffToUI() {
-    document.querySelectorAll('.diff-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.diff === settings.botLevel);
-    });
-  }
   applyDiffToUI();
 
   document.querySelectorAll('.diff-btn').forEach(btn => {
@@ -607,10 +616,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('ads-toggle-btn').addEventListener('click', () => {
     settings.adsMode = 'toggle';
     applySettingsToUI();
+    saveSettings(settings);
   });
   document.getElementById('ads-hold-btn').addEventListener('click', () => {
     settings.adsMode = 'hold';
     applySettingsToUI();
+    saveSettings(settings);
   });
 
   document.getElementById('btn-save-settings').addEventListener('click', () => {
@@ -714,7 +725,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Resume button ─────────────────────────────────────
   document.getElementById('btn-resume').addEventListener('click', e => {
     e.stopPropagation();
-    if (activeGame?.alive && activeGame?.running) activeGame.controls.lock();
+    if (activeGame?.alive && activeGame?.running) activeGame.tryPointerLock();
   });
 
   // ── In-game weapon selector ───────────────────────────

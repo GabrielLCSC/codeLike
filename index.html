@@ -359,6 +359,10 @@
       <span class="ammo-hint-key">F</span> Take weapon
     </div>
 
+    <div id="hud-mag-hint" class="hidden">
+      <span class="ammo-hint-key">F</span> Take magazine
+    </div>
+
     <div id="hud-grenade-hint" class="hidden">
       <span class="grenade-hint-title">GRENADE</span>
       <div id="hud-grenade-fuse-track"><div id="hud-grenade-fuse-fill"></div></div>
@@ -368,8 +372,8 @@
     <!-- Bottom-right: ammo + weapon -->
     <div id="hud-ammo">
       <div id="hud-weapon-slots">
-        <span class="weapon-slot active" data-slot="primary"><span class="slot-key">1</span> MAIN</span>
-        <span class="weapon-slot" data-slot="side"><span class="slot-key">2</span> SIDE</span>
+        <span class="weapon-slot active" data-slot="primary"><span class="slot-key">1</span> SLOT 1</span>
+        <span class="weapon-slot" data-slot="side"><span class="slot-key">2</span> SLOT 2</span>
       </div>
       <span id="hud-grenades">G 4</span>
       <span id="hud-weapon-name">ASSAULT RIFLE</span>
@@ -497,6 +501,7 @@
         <span>Tab</span> Leaderboard <span class="plo-mp-only">(multi)</span>
       </div>
 
+      <div id="plo-pause-content" class="hidden">
       <!-- In-game settings panel -->
       <div class="ingame-panel">
         <div class="ingame-section">
@@ -516,6 +521,7 @@
       <div class="plo-actions">
         <button class="confirm-btn" id="btn-resume">RESUME</button>
         <button class="confirm-btn confirm-btn--secondary" id="btn-exit-to-menu">EXIT TO MENU</button>
+      </div>
       </div>
     </div>
   </div>

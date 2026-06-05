@@ -26,6 +26,42 @@ function emptyProfile(pseudo) {
   };
 }
 
+/** Default gameplay / UI preferences (stored per user under users/{uid}/settings). */
+export const USER_SETTINGS_DEFAULTS = {
+  sensitivity: 2.0,
+  fov:         75,
+  volume:      1.0,
+  weapon:      'assault_rifle',
+  adsMode:     'toggle',
+  botCount:    3,
+  botLevel:    'corporal',
+  team:        'alpha',
+  gameType:    'ffa',
+  mapId:       'city',
+};
+
+const ADS_MODES    = new Set(['toggle', 'hold']);
+const BOT_LEVELS   = new Set(['private', 'corporal', 'commando', 'veteran']);
+const GAME_TYPES   = new Set(['ffa', 'lodibidon']);
+const WEAPON_KEYS  = new Set(['assault_rifle', 'ak47', 'shotgun', 'sniper']);
+const TEAM_KEYS    = new Set(['alpha', 'omega']);
+
+/** @param {object|null|undefined} raw */
+export function sanitizeUserSettings(raw) {
+  const s = { ...USER_SETTINGS_DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
+  s.sensitivity = Math.min(5, Math.max(0.5, Number(s.sensitivity) || USER_SETTINGS_DEFAULTS.sensitivity));
+  s.fov         = Math.min(110, Math.max(60, parseInt(s.fov, 10) || USER_SETTINGS_DEFAULTS.fov));
+  s.volume      = Math.min(1, Math.max(0, Number(s.volume) ?? USER_SETTINGS_DEFAULTS.volume));
+  s.weapon      = WEAPON_KEYS.has(s.weapon) ? s.weapon : USER_SETTINGS_DEFAULTS.weapon;
+  s.adsMode     = ADS_MODES.has(s.adsMode) ? s.adsMode : USER_SETTINGS_DEFAULTS.adsMode;
+  s.botCount    = Math.min(10, Math.max(0, parseInt(s.botCount, 10) || USER_SETTINGS_DEFAULTS.botCount));
+  s.botLevel    = BOT_LEVELS.has(s.botLevel) ? s.botLevel : USER_SETTINGS_DEFAULTS.botLevel;
+  s.team        = TEAM_KEYS.has(s.team) ? s.team : USER_SETTINGS_DEFAULTS.team;
+  s.gameType    = GAME_TYPES.has(s.gameType) ? s.gameType : USER_SETTINGS_DEFAULTS.gameType;
+  s.mapId       = typeof s.mapId === 'string' && s.mapId.length ? s.mapId : USER_SETTINGS_DEFAULTS.mapId;
+  return s;
+}
+
 export class AuthManager {
   constructor() {
     this.auth    = null;
@@ -113,6 +149,10 @@ export class AuthManager {
     try {
       await this.db.ref(`users/${uid}`).set(data);
       await this.db.ref(`users_by_pseudo/${key}`).set(uid);
+      await this.db.ref(`users/${uid}/settings`).set({
+        ...USER_SETTINGS_DEFAULTS,
+        updatedAt: Date.now(),
+      });
     } catch (e) {
       try { await cred.user.delete(); } catch { /* ignore */ }
       if (e?.code === 'PERMISSION_DENIED') {
@@ -157,6 +197,26 @@ export class AuthManager {
     }
     this.profile = snap.val();
     return this.profile;
+  }
+
+  /** Load persisted preferences for the signed-in user. */
+  async loadUserSettings() {
+    if (!this.uid) return { ...USER_SETTINGS_DEFAULTS };
+    const snap = await this.db.ref(`users/${this.uid}/settings`).once('value');
+    return sanitizeUserSettings(snap.val());
+  }
+
+  /**
+   * Save preferences to Realtime Database (users/{uid}/settings).
+   * @param {object} settings — gameplay prefs only (no username)
+   */
+  async saveUserSettings(settings) {
+    if (!this.uid) return;
+    const payload = sanitizeUserSettings(settings);
+    await this.db.ref(`users/${this.uid}/settings`).set({
+      ...payload,
+      updatedAt: Date.now(),
+    });
   }
 
   async updatePseudo(newPseudo) {
