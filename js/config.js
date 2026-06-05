@@ -2,6 +2,10 @@
 //  WARFRONT — Game constants & weapon definitions
 // ═══════════════════════════════════════════════════════════
 
+// ─── RENDER ──────────────────────────────────────────────────
+/** Cap Retina DPR (1.5 ≈ sharp on MacBook, much cheaper than 2). */
+export const MAX_PIXEL_RATIO = 1.5;
+
 // ─── MAP ─────────────────────────────────────────────────────
 export const MAP_W       = 44;   // grid cells wide
 export const MAP_H       = 44;   // grid cells tall
@@ -30,17 +34,21 @@ export const AMMO_CHEST_COOLDOWN_MS = 59000;
 
 /** Grid cell sync for multiplayer (not fog-of-war). */
 export const MAP_SCAN_RADIUS    = 2;
-/** Minimap: half-width of visible world area (metres). */
-export const MINIMAP_VIEW_RADIUS = 22;
-/** Enemy ping on minimap every N seconds. */
-export const MINIMAP_PING_INTERVAL = 4;
-export const MINIMAP_PING_FADE_MS   = 4000;
+/** Minimap: half-width of visible world area (metres). Larger = less zoom. */
+export const MINIMAP_VIEW_RADIUS = 28;
+/** Radar: 360° lap (seconds), repeats every cycle. */
+export const MINIMAP_SWEEP_LAP_S       = 1;
+export const MINIMAP_SWEEP_CYCLE_S     = 3;
+/** Sweep start bearing: π/2 = 6 o'clock, progresses clockwise. */
+export const MINIMAP_SWEEP_START_RAD   = Math.PI / 2;
+/** Angular width of the sweep beam (radians). */
+export const MINIMAP_SWEEP_BEAM_RAD = 0.3;
+/** How long revealed enemy blips stay visible (ms). */
+export const MINIMAP_REVEAL_FADE_MS   = 3500;
 /** Spawn / chest separation — occupancy counted within this range. */
 export const SPAWN_OCCUPANCY_RADIUS = 8;
 /** Assists credited if you damaged target within this window (ms). */
 export const ASSIST_WINDOW_MS   = 5000;
-/** How often bots refresh their chase waypoint toward the player (seconds). */
-export const BOT_PLAYER_TRACK_INTERVAL = 5;
 
 // ─── GRENADES ────────────────────────────────────────────────
 export const GRENADE_MAX         = 2;
@@ -121,7 +129,10 @@ export const BOT_SPEED         = 4.5;   // march speed (world units / s)
 export const BOT_ATTACK_RANGE  = 22;    // start shooting with LOS within this range
 export const BOT_SHOOT_MIN     = 850;   // ms between shots (base)
 export const BOT_SHOOT_JITTER  = 550;
-export const BOT_STRAFES       = true;
+/** Seconds between path replans (base). */
+export const BOT_REPLAN_INTERVAL = 0.65;
+/** Replan early when the player moves at least this far (world units²). */
+export const BOT_REPLAN_MOVE_SQ  = 9;
 
 /** Difficulty — only accuracy (`hitBase`) changes. */
 export const BOT_LEVELS = {

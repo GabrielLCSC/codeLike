@@ -2,11 +2,8 @@
 //  WARFRONT — Host-authoritative bot (AI + body)
 // ═══════════════════════════════════════════════════════════
 
-import {
-  BOT_SPEED,
-  BOT_PLAYER_TRACK_INTERVAL,
-} from '../config.js';
-import { BotBrain }     from './brain.js';
+import { BOT_SPEED } from '../config.js';
+import { BotBrain } from './brain.js';
 import { BotLocomotion } from './locomotion.js';
 import { BotSoldierEntity } from './soldier-entity.js';
 
@@ -14,7 +11,7 @@ const DEFAULT_SKILL = { label: 'CORPORAL', hitBase: 0.35 };
 
 /**
  * Full bot for solo / multiplayer host.
- * API unchanged for game.js compatibility.
+ * Behavior: chase player (A* around walls) → shoot when line-of-sight opens.
  */
 export class Bot {
   /**
@@ -44,12 +41,9 @@ export class Bot {
     this.brain = new BotBrain(index, skill, map);
     this.loco  = new BotLocomotion(this.mesh, map, spawnPos);
     this.loco.nudgeFromSpawn();
-    this.brain._refreshAdvanceTarget(spawnPos.x, spawnPos.z, spawnPos.x, spawnPos.z);
-    this.brain.trackTimer = BOT_PLAYER_TRACK_INTERVAL * 0.25;
 
     this.speed = BOT_SPEED + (Math.random() - 0.5) * 0.25;
 
-    /** Session scoreboard only (not persisted). */
     this.kills   = 0;
     this.deaths  = 0;
     this.assists = 0;
@@ -65,66 +59,42 @@ export class Bot {
   update(delta, nowMs, playerPos, onHitPlayer) {
     if (!this.alive) return;
 
-    const bx = this.loco.x;
-    const bz = this.loco.z;
+    const bx     = this.loco.x;
+    const bz     = this.loco.z;
     const hasLOS = this.map.hasLOS(bx, bz, playerPos.x, playerPos.z);
-    const { dist, aimX, aimZ } = this.brain.perceive(playerPos, bx, bz, hasLOS, delta);
-    this.entity.phase = this.brain.phase;
+    const ctx    = this.brain.tick(bx, bz, playerPos.x, playerPos.z, hasLOS, delta);
 
-    if (this.brain.phase === 'engage') {
-      this._tickEngage(delta, nowMs, aimX, aimZ, dist, onHitPlayer);
+    this.entity.phase = this.brain.phase;
+    this.loco.turnToward(ctx.aimX, ctx.aimZ, delta, ctx.mode === 'fight');
+
+    if (ctx.mode === 'fight') {
+      const shot = this.brain.tryShoot(nowMs, ctx.dist, delta);
+      if (shot.playShot) {
+        this._playSound('ar_shoot', { volume: 0.78, maxDist: 35 });
+        this._onShoot?.();
+        this.entity.playRecoil();
+      }
+      if (shot.fire && shot.damage > 0) {
+        onHitPlayer(shot.damage, `Bot-${this.index + 1}`);
+      }
     } else {
-      this._tickAdvance(delta, aimX, aimZ);
+      const { moved, pathIdx } = this.loco.stepAlongPath(
+        this.brain.path,
+        this.brain.pathIdx,
+        delta,
+        this.speed,
+      );
+      this.brain.pathIdx = pathIdx;
+
+      if (moved) {
+        this._emitFootstep(delta, true);
+      } else if (this.loco.stuckTime > 0.35) {
+        this.brain.replanTimer = 0;
+        this.loco.stuckTime = 0;
+      }
     }
 
     this.entity.updateAnimation(delta, true);
-  }
-
-  _tickAdvance(delta, aimX, aimZ) {
-    const bx = this.loco.x;
-    const bz = this.loco.z;
-    const tx = this.brain.target.x;
-    const tz = this.brain.target.z;
-
-    if (Math.hypot(tx - bx, tz - bz) < 1.4) {
-      this.brain._refreshAdvanceTarget(bx, bz, aimX, aimZ);
-    }
-
-    const lane = this.brain.laneMarch.lane;
-    const wx   = this.brain.target.x;
-    const wz   = this.brain.target.z;
-
-    if (this.loco.stepLane(wx, wz, lane, delta, this.speed)) {
-      this._emitFootstep(delta, true);
-    } else if (this.loco.stuckTime > 0.35) {
-      this.loco.nudgeInLane(lane);
-      this.brain._refreshAdvanceTarget(this.loco.x, this.loco.z, aimX, aimZ);
-      this.loco.stuckTime = 0;
-    }
-
-    this.loco.turnToward(aimX, aimZ, delta, false);
-  }
-
-  _tickEngage(delta, nowMs, aimX, aimZ, dist, onHitPlayer) {
-    this.loco.turnToward(aimX, aimZ, delta, true);
-
-    const retreat = this.brain.retreatStep(dist, delta, this.speed, this.mesh.rotation.y);
-    if (retreat) this.loco.tryStep(retreat.dx, retreat.dz);
-
-    const strafe = this.brain.strafeStep(delta, this.speed, this.mesh.rotation.y);
-    if (strafe && this.loco.tryStep(strafe.dx, strafe.dz)) {
-      this._emitFootstep(delta, true);
-    }
-
-    const shot = this.brain.tryShoot(nowMs, dist, delta);
-    if (shot.playShot) {
-      this._playSound('ar_shoot', { volume: 0.78, maxDist: 35 });
-      this._onShoot?.();
-      this.entity.playRecoil();
-    }
-    if (shot.fire && shot.damage > 0) {
-      onHitPlayer(shot.damage, `Bot-${this.index + 1}`);
-    }
   }
 
   getSyncState() {
@@ -147,7 +117,7 @@ export class Bot {
         this.alive = this.entity.alive;
         this.health = this.entity.health;
         this.loco.nudgeFromSpawn();
-        this.brain.resetTracking();
+        this.brain.reset();
         this.loco.stuckTime = 0;
       });
       return true;

@@ -1,106 +1,132 @@
 // ═══════════════════════════════════════════════════════════
-//  WARFRONT — Bot tactical brain (targeting, combat decisions)
+//  WARFRONT — Bot brain (chase → fight)
 // ═══════════════════════════════════════════════════════════
 
 import {
   BOT_ATTACK_RANGE,
-  BOT_PLAYER_TRACK_INTERVAL,
   BOT_SHOOT_MIN,
   BOT_SHOOT_JITTER,
-  BOT_STRAFES,
   BOT_DAMAGE,
+  BOT_REPLAN_INTERVAL,
+  BOT_REPLAN_MOVE_SQ,
 } from '../config.js';
-import { LaneMarch } from './lane-march.js';
+import { GridPathfinder } from './grid-path.js';
 
-/** @typedef {'advance'|'engage'} BotPhase */
+/** @typedef {'chase'|'fight'} BotMode */
 
-/**
- * Handles perception sampling, phase transitions, and combat rolls.
- */
 export class BotBrain {
-  /**
-   * @param {number} index — bot slot (spreads flank offsets)
-   * @param {{ hitBase: number }} skill — difficulty accuracy only
-   */
   /**
    * @param {number} index
    * @param {{ hitBase: number }} skill
    * @param {import('../mapgen.js').MapGenerator} map
    */
   constructor(index, skill, map) {
-    this.index    = index;
-    this.hitBase  = skill.hitBase ?? 0.35;
-    this.phase    = /** @type {BotPhase} */ ('advance');
+    this.index       = index;
+    this.hitBase     = skill.hitBase ?? 0.35;
+    this.pathfinder  = new GridPathfinder(map);
+    this.mode        = /** @type {BotMode} */ ('chase');
+    /** @type {{ x:number, z:number }[]} */
+    this.path        = [];
+    this.pathIdx     = 0;
+    this.replanTimer   = index * 0.08;
+    this._lastGoalX    = null;
+    this._lastGoalZ    = null;
 
-    this.laneMarch  = new LaneMarch(map, index);
-    this.target     = { x: 0, z: 0 };
-    this.trackTimer = (index * BOT_PLAYER_TRACK_INTERVAL) / 8;
-
-    this.lastShotMs  = -9999;
-    this.shootGap    = BOT_SHOOT_MIN + Math.random() * BOT_SHOOT_JITTER;
+    this.lastShotMs   = -9999;
+    this.shootGap     = BOT_SHOOT_MIN + Math.random() * BOT_SHOOT_JITTER;
     this.burstLeft    = 0;
     this.burstPauseMs = 0;
-
-    this.strafeDir   = Math.random() > 0.5 ? 1 : -1;
-    this.strafeTimer = 1.2 + Math.random();
   }
 
-  resetTracking() {
-    this.trackTimer = 0;
-    this.laneMarch.lane = null;
+  /** @deprecated alias for host-bot animation sync */
+  get phase() {
+    return this.mode === 'fight' ? 'engage' : 'advance';
   }
 
-  /** Advance target: lane-centred waypoint, not direct beeline to player. */
-  _refreshAdvanceTarget(botX, botZ, playerX, playerZ) {
-    this.laneMarch.ensureLane(botX, botZ, playerX, playerZ);
-    this.laneMarch.rollWaypoint(botX, botZ, playerX, playerZ);
-    this.target.x = this.laneMarch.waypoint.x;
-    this.target.z = this.laneMarch.waypoint.z;
+  reset() {
+    this.mode = 'chase';
+    this.path = [];
+    this.pathIdx = 0;
+    this.replanTimer = 0;
+    this._lastGoalX  = null;
+    this._lastGoalZ  = null;
   }
 
   /**
-   * @param {THREE.Vector3} playerPos
-   * @param {number} botX
-   * @param {number} botZ
-   * @param {boolean} hasLOS
-   * @param {number} delta
+   * Decide chase vs fight and keep path up to date.
+   * @returns {{ mode: BotMode, dist: number, canFight: boolean, aimX: number, aimZ: number }}
    */
-  perceive(playerPos, botX, botZ, hasLOS, delta) {
-    this.trackTimer -= delta;
-    if (this.phase === 'advance' && this.trackTimer <= 0) {
-      this.trackTimer = BOT_PLAYER_TRACK_INTERVAL;
-      this._refreshAdvanceTarget(botX, botZ, playerPos.x, playerPos.z);
-    }
+  tick(botX, botZ, playerX, playerZ, hasLOS, delta) {
+    const dist     = Math.hypot(playerX - botX, playerZ - botZ);
+    const canFight = hasLOS && dist <= BOT_ATTACK_RANGE;
 
-    const dist = Math.hypot(playerPos.x - botX, playerPos.z - botZ);
-    const leave = BOT_ATTACK_RANGE * 1.1;
-
-    if (this.phase === 'engage') {
-      if (dist > leave || !hasLOS) {
-        this.phase = 'advance';
-        this.trackTimer = 0;
-      }
-    } else if (dist <= BOT_ATTACK_RANGE && hasLOS) {
-      this.phase = 'engage';
-      this.strafeDir   = Math.random() > 0.5 ? 1 : -1;
-      this.strafeTimer = 0.8 + Math.random() * 1.2;
-      this.burstLeft   = 2 + Math.floor(Math.random() * 4);
+    if (canFight) {
+      this.mode = 'fight';
+      this.path  = [];
+      this.pathIdx = 0;
     } else {
-      this.phase = 'advance';
+      this.mode = 'chase';
+      this.replanTimer -= delta;
+
+      const goalDx = this._lastGoalX == null ? Infinity : playerX - this._lastGoalX;
+      const goalDz = this._lastGoalZ == null ? Infinity : playerZ - this._lastGoalZ;
+      const goalMovedSq = goalDx * goalDx + goalDz * goalDz;
+      const due    = this.replanTimer <= 0;
+      const moved  = this._lastGoalX == null || goalMovedSq >= BOT_REPLAN_MOVE_SQ;
+
+      if (!this.path.length || (due && moved)) {
+        this.replanTimer = BOT_REPLAN_INTERVAL + this.index * 0.08;
+        this._lastGoalX   = playerX;
+        this._lastGoalZ   = playerZ;
+        this._replanPath(botX, botZ, playerX, playerZ);
+      } else if (due) {
+        this.replanTimer = BOT_REPLAN_INTERVAL * 0.5;
+      }
     }
 
-    return { dist, hasLOS, aimX: playerPos.x, aimZ: playerPos.z };
+    return { mode: this.mode, dist, canFight, aimX: playerX, aimZ: playerZ };
+  }
+
+  _replanPath(botX, botZ, playerX, playerZ) {
+    let goalX = playerX;
+    let goalZ = playerZ;
+
+    const peek = this.pathfinder.findNearestLosCell(botX, botZ, playerX, playerZ);
+    if (peek) {
+      goalX = peek.x;
+      goalZ = peek.z;
+    }
+
+    const raw = this.pathfinder.findPath(botX, botZ, goalX, goalZ)
+      ?? this.pathfinder.findPath(botX, botZ, playerX, playerZ);
+
+    if (!raw?.length) {
+      this.path    = [{ x: playerX, z: playerZ }];
+      this.pathIdx = 0;
+      return;
+    }
+
+    let start = 0;
+    while (start < raw.length - 1) {
+      const wp = raw[start];
+      if (Math.hypot(wp.x - botX, wp.z - botZ) > 1) break;
+      start++;
+    }
+
+    this.path    = raw.slice(start);
+    this.pathIdx = 0;
   }
 
   /** @returns {{ fire: boolean, damage: number, playShot: boolean }} */
   tryShoot(nowMs, dist, deltaSec) {
-    if (this.phase !== 'engage') return { fire: false, damage: 0, playShot: false };
+    if (this.mode !== 'fight') {
+      return { fire: false, damage: 0, playShot: false };
+    }
 
     if (this.burstPauseMs > 0) {
       this.burstPauseMs -= deltaSec * 1000;
       return { fire: false, damage: 0, playShot: false };
     }
-
     if (nowMs - this.lastShotMs < this.shootGap) {
       return { fire: false, damage: 0, playShot: false };
     }
@@ -121,27 +147,5 @@ export class BotBrain {
       damage:   hit ? BOT_DAMAGE : 0,
       playShot: true,
     };
-  }
-
-  /** Strafe step vector in world XZ (metres this frame). */
-  strafeStep(delta, speed, rotY) {
-    if (!BOT_STRAFES || this.phase !== 'engage') return null;
-
-    this.strafeTimer -= delta;
-    if (this.strafeTimer <= 0) {
-      this.strafeDir   = -this.strafeDir;
-      this.strafeTimer = 1.2 + Math.random() * 1.6;
-    }
-
-    const perp = rotY + Math.PI / 2;
-    const s    = speed * 0.42 * this.strafeDir * delta;
-    return { dx: Math.sin(perp) * s, dz: Math.cos(perp) * s };
-  }
-
-  /** Optional micro-reposition when hugging the player. */
-  retreatStep(dist, delta, speed, rotY) {
-    if (this.phase !== 'engage' || dist > 5) return null;
-    const back = speed * 0.35 * delta;
-    return { dx: -Math.sin(rotY) * back, dz: -Math.cos(rotY) * back };
   }
 }

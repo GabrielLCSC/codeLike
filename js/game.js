@@ -11,9 +11,8 @@ import {
   PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
-  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL, BOT_SYNC_INTERVAL,
+  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
   GRENADE_DAMAGE, GRENADE_RADIUS, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
-  MINIMAP_PING_INTERVAL,
 } from './config.js';
 import { MapScanner } from './map-scanner.js';
 import { MapGenerator }  from './mapgen.js';
@@ -91,7 +90,6 @@ export class Game {
     this._damageLog       = new Map();
     /** @type {import('./map-scanner.js').MapScanner|null} */
     this.mapScanner       = null;
-    this._minimapPingTimer = 0;
     this.damageFlashTimer = 0;
 
     // ── Scene objects ─────────────────────────────────────
@@ -115,6 +113,9 @@ export class Game {
     // Raycaster shared across all shots
     this.raycaster    = new THREE.Raycaster();
     this._hitWorldPos = new THREE.Vector3();
+    this._fwdVec      = new THREE.Vector3();
+    this._rgtVec      = new THREE.Vector3();
+    this._camDir      = new THREE.Vector3();
     this._playerSpawnSlot = 0;
     this._claimedSpawns   = new Set();
     this.raycaster.far = 80;
@@ -204,7 +205,7 @@ export class Game {
     const canvas = document.getElementById('game-canvas');
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
     window.addEventListener('resize', this._onResize);
@@ -264,6 +265,7 @@ export class Game {
       this.username,
       this.mode === 'multi' && this.mp ? this.mp.roomCode : '',
     );
+    this.hud.initMinimapBasemap(this.map.mapGrid);
     this.hud.setHealth(this.health);
     this.hud.setScore(this.kills, this.deaths);
 
@@ -378,21 +380,19 @@ export class Game {
     this._damageLog.set(targetKey, list);
   }
 
-  /** Periodic minimap pings for bots / remote players (not continuous). */
-  _updateMinimapPings(delta) {
-    this._minimapPingTimer -= delta;
-    if (this._minimapPingTimer > 0) return;
-    this._minimapPingTimer = MINIMAP_PING_INTERVAL;
-
+  /** Live enemy positions for minimap radar sweep. */
+  _collectMinimapEnemies() {
+    const out = [];
     const sources = this._isMpClient() ? this.syncedBots : this.bots;
     for (const b of sources) {
       if (!b?.alive) continue;
-      this.hud.pushMinimapPing(b.mesh.position.x, b.mesh.position.z, '#ff4444');
+      out.push({ x: b.mesh.position.x, z: b.mesh.position.z, color: '#ff4444' });
     }
     for (const rp of this.remotePlayers.values()) {
       if (!rp.mesh.visible) continue;
-      this.hud.pushMinimapPing(rp.mesh.position.x, rp.mesh.position.z, '#4488ff');
+      out.push({ x: rp.mesh.position.x, z: rp.mesh.position.z, color: '#4488ff' });
     }
+    return out;
   }
 
   _consumeAssists(targetKey) {
@@ -785,8 +785,8 @@ export class Game {
         this.lastSyncMs    = nowMs;
         this.lastRotSyncMs = nowMs;
         const pos = this.camera.position;
-        const dir = new THREE.Vector3();
-        this.camera.getWorldDirection(dir);
+        this.camera.getWorldDirection(this._camDir);
+        const dir = this._camDir;
         const { gx, gz } = this.mapScanner.worldToCell(pos.x, pos.z);
         this._lastSyncGx = gx;
         this._lastSyncGz = gz;
@@ -805,13 +805,12 @@ export class Game {
     }
 
     // Minimap — flatten Three.js objects to plain data
-    const dir = new THREE.Vector3();
-    this.camera.getWorldDirection(dir);
-    this._updateMinimapPings(delta);
+    this.camera.getWorldDirection(this._camDir);
+    const dir = this._camDir;
     this.hud.updateMinimap(
-      { grid: this.map.grid, width: this.map.width, height: this.map.height },
       { x: this.camera.position.x, z: this.camera.position.z, dirX: dir.x, dirZ: dir.z },
       nowMs,
+      this._collectMinimapEnemies(),
     );
   }
 
@@ -863,11 +862,11 @@ export class Game {
     const fwd = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0);
     const rgt = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0);
 
-    const fwdVec = new THREE.Vector3();
+    const fwdVec = this._fwdVec;
     this.camera.getWorldDirection(fwdVec);
     fwdVec.y = 0; fwdVec.normalize();
 
-    const rgtVec = new THREE.Vector3();
+    const rgtVec = this._rgtVec;
     rgtVec.setFromMatrixColumn(this.camera.matrix, 0);
     rgtVec.y = 0; rgtVec.normalize();
 
@@ -1362,6 +1361,7 @@ export class Game {
   _handleResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   }
 

@@ -1,13 +1,10 @@
 // ═══════════════════════════════════════════════════════════
-//  WARFRONT — Bot locomotion (lane march, no wall sliding)
+//  WARFRONT — Bot locomotion (path follow + collision)
 // ═══════════════════════════════════════════════════════════
 
 import { SPAWN_OCCUPANCY_RADIUS } from '../config.js';
 import { yawToward } from '../character.js';
 
-/**
- * Movement on the map grid — no sliding along walls on advance.
- */
 export class BotLocomotion {
   /**
    * @param {THREE.Object3D} mesh
@@ -56,84 +53,59 @@ export class BotLocomotion {
     return false;
   }
 
-  /** Combat strafe — single step only, no axis slide. */
-  tryStep(dx, dz) {
-    const nx = this.x + dx;
-    const nz = this.z + dz;
-    if (!this.canWalk(nx, nz)) return false;
-    this.mesh.position.x = nx;
-    this.mesh.position.z = nz;
-    return true;
-  }
-
   /**
-   * March toward a lane waypoint (stay near lane centre, no wall hugging).
-   * @param {{ centerX: number }} lane
-   * @returns {boolean}
+   * Follow A* waypoints.
+   * @returns {{ moved: boolean, pathIdx: number }}
    */
-  stepLane(wx, wz, lane, delta, speed) {
-    const bx = this.x;
-    const bz = this.z;
-    let dx = wx - bx;
-    let dz = wz - bz;
-    const dist = Math.hypot(dx, dz);
-    if (dist < 0.2) {
-      this.stuckTime = 0;
-      return false;
+  stepAlongPath(waypoints, pathIdx, delta, speed) {
+    if (!waypoints?.length) {
+      this.stuckTime += delta;
+      return { moved: false, pathIdx: 0 };
     }
 
-    const step = Math.min(speed * delta, dist);
-    if (lane) {
-      dx += (lane.centerX - bx) * 0.35;
-    }
+    let idx = Math.min(pathIdx, waypoints.length - 1);
 
-    const len = Math.hypot(dx, dz) || 1;
-    const nx = bx + (dx / len) * step;
-    const nz = bz + (dz / len) * step;
+    while (idx < waypoints.length) {
+      const wp   = waypoints[idx];
+      const dx   = wp.x - this.x;
+      const dz   = wp.z - this.z;
+      const dist = Math.hypot(dx, dz);
 
-    if (this.canWalk(nx, nz)) {
-      this.mesh.position.x = nx;
-      this.mesh.position.z = nz;
-      this.stuckTime = 0;
-      return true;
-    }
-
-    if (Math.abs(dz) >= Math.abs(dx)) {
-      const nzOnly = bz + Math.sign(wz - bz) * step;
-      if (this.canWalk(bx, nzOnly)) {
-        this.mesh.position.z = nzOnly;
+      if (dist < 0.55) {
+        idx++;
         this.stuckTime = 0;
-        return true;
+        continue;
       }
-    }
 
-    if (lane) {
-      const pull = Math.sign(lane.centerX - bx) * Math.min(step, Math.abs(lane.centerX - bx));
-      const nxOnly = bx + pull;
-      if (pull !== 0 && this.canWalk(nxOnly, bz)) {
-        this.mesh.position.x = nxOnly;
-        this.stuckTime = 0;
-        return true;
-      }
-    }
+      const step = Math.min(speed * delta, dist);
+      const ux   = dx / dist;
+      const uz   = dz / dist;
+      const nx   = this.x + ux * step;
+      const nz   = this.z + uz * step;
 
-    this.stuckTime += delta;
-    return false;
-  }
-
-  /** Nudge to a random open spot in-lane when blocked. */
-  nudgeInLane(lane) {
-    if (!lane) return;
-    for (let i = 0; i < 10; i++) {
-      const nx = lane.centerX + (Math.random() - 0.5) * lane.halfWidth;
-      const nz = this.z + (Math.random() - 0.5) * 4;
-      if (this.canWalk(nx, nz) && !this.nearSpawn(nx, nz)) {
+      if (this.canWalk(nx, nz)) {
         this.mesh.position.x = nx;
         this.mesh.position.z = nz;
         this.stuckTime = 0;
-        return;
+        return { moved: true, pathIdx: idx };
       }
+      if (this.canWalk(nx, this.z)) {
+        this.mesh.position.x = nx;
+        this.stuckTime = 0;
+        return { moved: true, pathIdx: idx };
+      }
+      if (this.canWalk(this.x, nz)) {
+        this.mesh.position.z = nz;
+        this.stuckTime = 0;
+        return { moved: true, pathIdx: idx };
+      }
+
+      this.stuckTime += delta;
+      return { moved: false, pathIdx: idx };
     }
+
+    this.stuckTime = 0;
+    return { moved: false, pathIdx: idx };
   }
 
   turnToward(tx, tz, delta, sharp = false) {
