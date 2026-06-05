@@ -8,6 +8,9 @@ import {
   updateCharacterAnimation,
   botStateToPose,
   resetCharacterPose,
+  resetCharacterDeath,
+  beginCharacterDeath,
+  updateCharacterDeath,
 } from '../character.js';
 import { BOT_HEALTH } from '../config.js';
 
@@ -30,6 +33,7 @@ export class SyncedBot {
     this.health     = BOT_HEALTH;
     this.maxHealth  = BOT_HEALTH;
     this.alive      = true;
+    this.dying      = false;
     this.state      = 'advance';
     this.kills      = 0;
     this.deaths     = 0;
@@ -53,6 +57,7 @@ export class SyncedBot {
   }
 
   applyState(data) {
+    const wasAlive = this.alive;
     this.targetPos.set(data.x ?? 0, 0, data.z ?? 0);
     this.targetRotY = data.rotY ?? 0;
     this.health     = data.health ?? this.maxHealth;
@@ -62,8 +67,35 @@ export class SyncedBot {
     this.deaths     = data.deaths  ?? 0;
     this.assists    = data.assists ?? 0;
     this.team       = data.team    ?? null;
-    this.mesh.visible = this.alive;
+
+    if (wasAlive && !this.alive) {
+      this._startDeath();
+    } else if (!wasAlive && this.alive) {
+      this._resetFromDeath();
+    }
+
+    this.mesh.visible = this.alive || this.dying;
     this._maybeRebuildVisual();
+  }
+
+  _startDeath() {
+    if (this.dying) return;
+    this.dying = true;
+    this.mesh.visible = true;
+    beginCharacterDeath(this.rig, this.mesh, {
+      onComplete: () => {
+        this.dying = false;
+        this.mesh.visible = false;
+        resetCharacterDeath(this.rig, this.mesh);
+        resetCharacterPose(this.rig);
+      },
+    });
+  }
+
+  _resetFromDeath() {
+    this.dying = false;
+    resetCharacterDeath(this.rig, this.mesh);
+    resetCharacterPose(this.rig);
   }
 
   _labelRoleForTeam(team) {
@@ -126,6 +158,10 @@ export class SyncedBot {
   }
 
   updateVisual(delta, camera, onFootstep) {
+    if (this.dying) {
+      updateCharacterDeath(this.rig, this.mesh, delta);
+      return;
+    }
     if (!this.alive) return;
 
     this.mesh.position.lerp(this.targetPos, 0.3);

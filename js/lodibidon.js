@@ -17,9 +17,7 @@ import { sound } from './sound.js';
 /** @typedef {'alpha'|'omega'} LodTeam */
 /** @typedef {'prep'|'live'|'flag'|'round_end'|'match_over'} LodPhase */
 
-export function yawToward(fromX, fromZ, toX, toZ) {
-  return Math.atan2(toX - fromX, toZ - fromZ);
-}
+export { yawTowardPoint as yawToward } from './math/angles.js';
 
 export function enemyTeam(team) {
   return team === 'alpha' ? 'omega' : 'alpha';

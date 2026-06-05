@@ -6,7 +6,9 @@ import { Game }               from './game.js';
 import { MultiplayerManager } from './multiplayer.js';
 import { sound }              from './sound.js';
 import { auth, USER_SETTINGS_DEFAULTS } from './auth.js';
-import { MAP_CATALOG, getMapGameplay } from './maps/index.js';
+import { MAP_CATALOG, getMapCatalog, getMapGameplay, prefetchCustomMapsFromFirebase } from './maps/index.js';
+import { initMapModels } from './maps/model-loader.js';
+import { setModelTools } from './maps/asset-catalog.js';
 
 // ─── SETTINGS (local cache + Firebase per user) ───────────
 const DEFAULTS = USER_SETTINGS_DEFAULTS;
@@ -105,9 +107,9 @@ function setupMapCards() {
   const grid = document.getElementById('map-grid');
   if (!grid) return;
   grid.innerHTML = '';
-  for (const m of MAP_CATALOG) {
+  for (const m of getMapCatalog()) {
     const card = document.createElement('div');
-    card.className = 'map-card';
+    card.className = 'map-card' + (m.custom ? ' custom-map' : '');
     card.dataset.map = m.id;
     card.innerHTML =
       `<h3>${m.name.toUpperCase()}</h3>` +
@@ -173,6 +175,9 @@ async function showAppMenu() {
   document.getElementById('auth-overlay').style.display = 'none';
   document.getElementById('menu-overlay').style.display = '';
   await refreshSettingsFromDb();
+  const models = await initMapModels();
+  setModelTools(models);
+  await prefetchCustomMapsFromFirebase();
   syncUsernameFromAuth();
   applySettingsToUI();
   setupGunCards();
@@ -233,6 +238,26 @@ function launchGame(mode, mpInstance = null) {
   document.getElementById('loading-screen')?.classList.add('hidden');
   _startGame(mode, mpInstance);
   activeGame?.tryPointerLock();
+}
+
+function launchMapEditor() {
+  document.getElementById('menu-overlay').style.display = 'none';
+  document.getElementById('loading-screen')?.classList.add('hidden');
+  if (activeGame) {
+    activeGame.stop({ leaveRoom: false });
+    activeGame = null;
+  }
+  syncUsernameFromAuth();
+  activeGame = new Game({
+    mode:        'solo',
+    editorMode:  true,
+    weapon:      settings.weapon,
+    sensitivity: settings.sensitivity,
+    fov:         settings.fov,
+    username:    auth.displayName,
+    adsMode:     settings.adsMode,
+  });
+  activeGame.start();
 }
 
 function _startGame(mode, mpInstance) {
@@ -551,6 +576,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-settings').addEventListener('click', () => {
     applySettingsToUI();
     showScreen('screen-settings');
+  });
+
+  document.getElementById('btn-map-editor')?.addEventListener('click', () => {
+    launchMapEditor();
   });
 
   document.getElementById('btn-profile').addEventListener('click', () => {

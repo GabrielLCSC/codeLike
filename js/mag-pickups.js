@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { WEAPONS } from './config.js';
-import { makeLabelTexture } from './weapon-pickups.js';
+import { makeLabelTexture } from './ui/label-texture.js';
 
 export const MAG_LABELS = {
   assault_rifle: 'MAG AR',

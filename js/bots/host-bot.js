@@ -64,8 +64,13 @@ export class Bot {
 
   get state() { return this.entity.phase; }
   set state(v) { this.entity.phase = v; }
+  get dying() { return this.entity.dying; }
 
   update(delta, nowMs, target, onHit, canAct = true) {
+    if (this.entity.dying) {
+      this.entity.updateDeath(delta);
+      return;
+    }
     if (!this.alive || !canAct) {
       if (this.alive && !canAct) this.entity.phase = 'idle';
       return;

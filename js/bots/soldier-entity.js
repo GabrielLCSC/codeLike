@@ -2,7 +2,6 @@
 //  WARFRONT — Bot soldier entity (mesh, vitals, VFX, animation)
 // ═══════════════════════════════════════════════════════════
 
-import * as THREE from 'three';
 import {
   BOT_HEALTH,
   BOT_RESPAWN_MS,
@@ -11,8 +10,11 @@ import {
   buildCharacterMesh,
   updateCharacterAnimation,
   resetCharacterPose,
+  resetCharacterDeath,
   triggerCharacterRecoil,
   updateCharacterOverheadUI,
+  updateCharacterDeath,
+  beginCharacterDeath,
   botStateToPose,
 } from '../character.js';
 
@@ -34,6 +36,7 @@ export class BotSoldierEntity {
     this.health    = BOT_HEALTH;
     this.maxHealth = BOT_HEALTH;
     this.alive     = true;
+    this.dying     = false;
     this.phase     = 'advance';
 
     const { mesh, rig, healthBar } = buildCharacterMesh({
@@ -68,6 +71,7 @@ export class BotSoldierEntity {
   }
 
   updateAnimation(delta, moving) {
+    if (this.dying) return;
     const bx = this.mesh.position.x;
     const bz = this.mesh.position.z;
     const moved = Math.hypot(bx - this._prevAnimX, bz - this._prevAnimZ);
@@ -80,8 +84,13 @@ export class BotSoldierEntity {
     );
   }
 
+  updateDeath(delta) {
+    if (!this.dying) return;
+    updateCharacterDeath(this.rig, this.mesh, delta);
+  }
+
   updateHealthBar(camera, map, opts = {}) {
-    if (!this.alive && !opts.alwaysShow) return;
+    if (this.dying || (!this.alive && !opts.alwaysShow)) return;
     updateCharacterOverheadUI(this.mesh, camera, map, {
       healthBar: this.healthBar,
       healthRatio: this.health / this.maxHealth,
@@ -102,43 +111,38 @@ export class BotSoldierEntity {
     triggerCharacterRecoil(this.rig);
   }
 
+  _finishDeathVisual() {
+    this.dying = false;
+    this.mesh.visible = false;
+    resetCharacterDeath(this.rig, this.mesh);
+    resetCharacterPose(this.rig);
+  }
+
   /**
    * @param {() => void} [onRespawn]
    * @param {number} [respawnMs] — 0 disables respawn (lodibidon)
    */
   die(onRespawn, respawnMs = BOT_RESPAWN_MS) {
     this.alive = false;
-    this.mesh.visible = false;
+    this.dying = true;
+    this.mesh.visible = true;
 
-    const mat = new THREE.MeshLambertMaterial({
-      color: 0x3a3f38, transparent: true, opacity: 1,
+    beginCharacterDeath(this.rig, this.mesh, {
+      onComplete: () => this._finishDeathVisual(),
     });
-    const corpse = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 1.50), mat);
-    corpse.position.set(this.mesh.position.x, 0.09, this.mesh.position.z);
-    corpse.rotation.y = this.mesh.rotation.y;
-    this.scene.add(corpse);
-
-    let t = 0;
-    const iv = setInterval(() => {
-      t += 0.1;
-      if (t > 5) mat.opacity = Math.max(0, 1 - (t - 5) / 3);
-      if (t >= 8) {
-        clearInterval(iv);
-        this.scene.remove(corpse);
-        mat.dispose();
-      }
-    }, 100);
 
     if (respawnMs <= 0) return;
 
     setTimeout(() => {
       this.health = this.maxHealth;
       this.alive  = true;
+      this.dying  = false;
       this.phase  = 'advance';
       this._mats.forEach(m => { m.emissive?.set(0x000000); });
+      resetCharacterDeath(this.rig, this.mesh);
+      resetCharacterPose(this.rig);
       this.mesh.position.set(this.spawnPos.x, 0, this.spawnPos.z);
       this.mesh.rotation.set(0, 0, 0);
-      resetCharacterPose(this.rig);
       this.mesh.visible = true;
       onRespawn?.();
     }, BOT_RESPAWN_MS);

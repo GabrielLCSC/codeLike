@@ -7,6 +7,9 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MAP_W, MAP_H, CELL_SIZE, WALL_HEIGHT } from './config.js';
 import { createMapGrid, getMapGameplay, DEFAULT_MAP_ID } from './maps/index.js';
 import { buildTriLaneScene } from './maps/tri-lane-scene.js';
+import { buildCustomMapScene } from './maps/custom-map-scene.js';
+import { mapDataToGameplay } from './maps/map-schema.js';
+import { registerCustomMap } from './maps/index.js';
 
 const CS = CELL_SIZE;
 const WH = WALL_HEIGHT;
@@ -41,17 +44,32 @@ export class MapGenerator {
   generate(mapId = this.mapId) {
     this.mapId = mapId;
     this.gameplay = getMapGameplay(mapId);
-    this.mapGrid = createMapGrid(mapId);
+    return this._applyGameplay();
+  }
+
+  /** @param {import('./maps/map-schema.js').CustomMapData} mapData */
+  generateFromEditorData(mapData) {
+    registerCustomMap(mapData);
+    this.mapId = mapData.meta.id;
+    this.gameplay = mapDataToGameplay(mapData);
+    return this._applyGameplay();
+  }
+
+  _applyGameplay() {
+    const gp = this.gameplay;
+    this.width  = gp.meta.width ?? MAP_W;
+    this.height = gp.meta.height ?? MAP_H;
+    this.mapGrid = createMapGrid(this.mapId);
     this.grid     = this.mapGrid.grid;
-    this.spawnPoints = this.gameplay.spawnPoints.map(s => ({ ...s }));
-    this.ammoChests  = this.gameplay.ammoChests.map(c => ({ ...c }));
-    this.groundWeapons = (this.gameplay.groundWeapons ?? []).map(w => ({ ...w }));
-    this.groundMags    = (this.gameplay.groundMags ?? []).map(m => ({ ...m }));
-    this.lanes       = [...(this.gameplay.lanes ?? [])];
-    this.lodibidonCenter = { ...this.gameplay.lodibidonCenter };
+    this.spawnPoints = gp.spawnPoints.map(s => ({ ...s }));
+    this.ammoChests  = gp.ammoChests.map(c => ({ ...c }));
+    this.groundWeapons = (gp.groundWeapons ?? []).map(w => ({ ...w }));
+    this.groundMags    = (gp.groundMags ?? []).map(m => ({ ...m }));
+    this.lanes       = [...(gp.lanes ?? [])];
+    this.lodibidonCenter = { ...gp.lodibidonCenter };
     this.lodibidonSpawns = {
-      alpha: this.gameplay.lodibidonSpawns.alpha.map(s => ({ ...s })),
-      omega: this.gameplay.lodibidonSpawns.omega.map(s => ({ ...s })),
+      alpha: gp.lodibidonSpawns.alpha.map(s => ({ ...s })),
+      omega: gp.lodibidonSpawns.omega.map(s => ({ ...s })),
     };
     this.rooms       = [];
     this.wallMeshes  = [];
@@ -64,9 +82,12 @@ export class MapGenerator {
   }
 
   buildScene(scene) {
-    buildTriLaneScene(scene, this.gameplay, (s, batches, M) => {
-      this._mergeBatches(s, batches, M);
-    });
+    const mergeFn = (s, batches, M) => this._mergeBatches(s, batches, M);
+    if (this.gameplay.meta?.scene === 'custom') {
+      buildCustomMapScene(scene, this.gameplay, mergeFn);
+    } else {
+      buildTriLaneScene(scene, this.gameplay, mergeFn);
+    }
     this._buildAmmoChests(scene);
     this._buildLighting(scene);
   }

@@ -92,6 +92,9 @@
           <button class="menu-btn menu-btn--secondary" id="btn-settings">
             <span class="btn-bracket">[</span> SETTINGS <span class="btn-bracket">]</span>
           </button>
+          <button class="menu-btn menu-btn--secondary" id="btn-map-editor">
+            <span class="btn-bracket">[</span> MAP EDITOR <span class="btn-bracket">]</span>
+          </button>
         </nav>
         <p class="menu-user-line">Signed in as <span id="lbl-menu-user">—</span></p>
         <div class="menu-footer">ZQSD TO MOVE · MOUSE TO AIM · CLICK TO SHOOT · R RELOAD · RMB SCOPE</div>
@@ -556,6 +559,33 @@
     <p>LOADING MAP…</p>
     <div class="loading-bar"><div id="loading-fill"></div></div>
   </div>
+
+  <!-- Map editor sidebar (Editor Mode only) -->
+  <aside id="map-editor-panel" class="map-editor-panel hidden">
+    <div class="editor-panel-inner">
+      <header class="editor-panel-header">
+        <h2>MAP EDITOR</h2>
+        <p class="editor-panel-sub">Grid snap · Firebase save/load</p>
+      </header>
+      <section class="editor-section">
+        <h3 class="editor-section-title">ASSET</h3>
+        <div id="editor-tool-list" class="editor-tool-list"></div>
+      </section>
+      <section class="editor-section">
+        <h3 class="editor-section-title">MAP</h3>
+        <div class="editor-actions">
+          <button type="button" class="editor-action-btn" id="editor-btn-new">New</button>
+          <button type="button" class="editor-action-btn" id="editor-btn-load">Load</button>
+          <button type="button" class="editor-action-btn editor-action-btn--primary" id="editor-btn-save">Save Map</button>
+        </div>
+      </section>
+      <p id="editor-status" class="editor-status">Ready</p>
+      <footer class="editor-panel-footer">
+        <p class="editor-hint">WASD pan · Scroll zoom · Right-drag orbit · Shift+click erase</p>
+        <button type="button" class="editor-action-btn editor-action-btn--danger" id="editor-btn-exit">Exit to Menu</button>
+      </footer>
+    </div>
+  </aside>
 
   <script type="module" src="js/main.js"></script>
 </body>

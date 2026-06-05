@@ -15,6 +15,10 @@
     "warfront_rooms": {
       ".read": true,
       ".write": true
+    },
+    "maps": {
+      ".read": true,
+      ".write": "auth != null"
     }
   }
 }

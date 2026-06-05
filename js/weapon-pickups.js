@@ -4,7 +4,10 @@
 
 import * as THREE from 'three';
 import { WEAPONS } from './config.js';
-import { buildWeaponWorldModel } from './weapon.js';
+import { buildWeaponWorldModel } from './weapons/gun-parts.js';
+import { makeLabelTexture } from './ui/label-texture.js';
+
+export { makeLabelTexture } from './ui/label-texture.js';
 
 /** Display labels for dropped / map weapons. */
 export const PICKUP_LABELS = {
@@ -21,35 +24,6 @@ export const PICKUP_LABELS = {
  */
 export function pickupLabelFor(weapon) {
   return PICKUP_LABELS[weapon] ?? WEAPONS[weapon]?.name ?? weapon.toUpperCase();
-}
-
-/**
- * @param {string} label
- * @returns {THREE.CanvasTexture}
- */
-export function makeLabelTexture(label) {
-  const canvas = document.createElement('canvas');
-  canvas.width  = 256;
-  canvas.height = 96;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.font = 'bold 36px "Courier New", monospace';
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(label, canvas.width / 2, 40);
-  const metrics = ctx.measureText(label);
-  const x0 = canvas.width / 2 - metrics.width / 2;
-  const x1 = canvas.width / 2 + metrics.width / 2;
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(x0, 58);
-  ctx.lineTo(x1, 58);
-  ctx.stroke();
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
 }
 
 function buildPickupVisual(weapon, label) {

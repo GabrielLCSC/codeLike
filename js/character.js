@@ -515,17 +515,137 @@ export function billboardCharacterLabels(mesh, camera, healthBar, healthRatio = 
   updateCharacterOverheadUI(mesh, camera, null, { healthBar, healthRatio });
 }
 
-/**
- * World yaw (Y) so character +Z (vest / visor) points toward (dx, dz).
- * Mesh is authored facing +Z; backpack at -Z.
- */
-export function yawToward(dx, dz) {
-  return Math.atan2(dx, dz);
-}
+export { yawFromDirection as yawToward } from './math/angles.js';
 
 /** Map bot AI phase → animation pose. */
 export function botStateToPose(state, moving = true) {
   if (state === 'engage' || state === 'attack') return 'aim';
   if (moving) return 'run';
   return 'idle';
+}
+
+// ─── Death animation ─────────────────────────────────────────
+export const DEATH_FALL_S  = 0.9;
+export const DEATH_HOLD_S  = 4;
+export const DEATH_FADE_S  = 2.5;
+
+function _collectMaterials(root, out) {
+  root.traverse(c => {
+    if (!c.isMesh?.material) return;
+    const mats = Array.isArray(c.material) ? c.material : [c.material];
+    for (const m of mats) {
+      if (!out.includes(m)) {
+        m.transparent = true;
+        out.push(m);
+      }
+    }
+  });
+}
+
+/**
+ * Start death sequence — falls to ground, holds, then fades (see updateCharacterDeath).
+ * @param {object} rig
+ * @param {THREE.Object3D} mesh
+ * @param {{ onComplete?: () => void }} [opts]
+ */
+export function beginCharacterDeath(rig, mesh, opts = {}) {
+  if (!rig || rig.death?.active) return false;
+
+  const overhead = mesh.getObjectByName('overheadUi');
+  if (overhead) overhead.visible = false;
+
+  const mats = [];
+  _collectMaterials(mesh, mats);
+
+  rig.death = {
+    active: true,
+    t: 0,
+    fallDuration: DEATH_FALL_S,
+    holdDuration: DEATH_HOLD_S,
+    fadeDuration: DEATH_FADE_S,
+    onComplete: opts.onComplete ?? null,
+    fallSign: Math.random() > 0.5 ? 1 : -1,
+    mats,
+    baseY: mesh.position.y,
+  };
+
+  mesh.rotation.order = 'YXZ';
+  return true;
+}
+
+/**
+ * @returns {'inactive'|'falling'|'holding'|'fading'|'done'}
+ */
+export function updateCharacterDeath(rig, mesh, delta) {
+  if (!rig?.death?.active) return 'inactive';
+
+  const d = rig.death;
+  d.t += delta;
+
+  const fallEnd = d.fallDuration;
+  const holdEnd = fallEnd + d.holdDuration;
+  const fadeEnd = holdEnd + d.fadeDuration;
+
+  const L = rig.leftArm;
+  const R = rig.rightArm;
+  const LL = rig.leftLeg;
+  const RL = rig.rightLeg;
+
+  if (d.t < fallEnd) {
+    const p = d.t / fallEnd;
+    const e = 1 - (1 - p) ** 3;
+
+    mesh.rotation.x = -e * (Math.PI / 2) * 0.98;
+    mesh.rotation.z = d.fallSign * e * 0.18;
+    mesh.position.y = d.baseY - e * 0.06;
+
+    const c = e;
+    L.group.rotation.x  = 0.25 + c * 0.85;
+    L.elbow.rotation.x  = -0.35 - c * 0.55;
+    R.group.rotation.x  = -0.45 - c * 0.75;
+    R.elbow.rotation.x  = -0.15 - c * 0.45;
+    LL.group.rotation.x = c * 1.15;
+    LL.knee.rotation.x  = -c * 1.45;
+    RL.group.rotation.x = c * 0.95;
+    RL.knee.rotation.x  = -c * 1.25;
+    rig.torso.rotation.x = c * 0.22;
+    rig.head.rotation.x  = -c * 0.4;
+    if (R.weapon) R.weapon.visible = false;
+
+    return 'falling';
+  }
+
+  if (d.t < holdEnd) {
+    mesh.rotation.x = -(Math.PI / 2) * 0.98;
+    mesh.position.y = d.baseY - 0.06;
+    return 'holding';
+  }
+
+  if (d.t < fadeEnd) {
+    const fadeP = (d.t - holdEnd) / d.fadeDuration;
+    const opacity = 1 - fadeP;
+    for (const m of d.mats) m.opacity = opacity;
+    return 'fading';
+  }
+
+  const cb = d.onComplete;
+  rig.death = null;
+  cb?.();
+  return 'done';
+}
+
+/** Restore mesh after death / before respawn. */
+export function resetCharacterDeath(rig, mesh) {
+  if (!rig) return;
+  if (rig.death?.mats) {
+    for (const m of rig.death.mats) m.opacity = 1;
+  }
+  rig.death = null;
+  if (mesh) {
+    mesh.rotation.order = 'XYZ';
+    mesh.rotation.x = 0;
+    mesh.rotation.z = 0;
+    mesh.position.y = 0;
+  }
+  if (rig.rightArm?.weapon) rig.rightArm.weapon.visible = true;
 }
