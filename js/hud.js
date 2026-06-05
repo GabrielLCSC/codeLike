@@ -124,10 +124,36 @@ export class HUD {
     }
   }
 
+  /** @param {boolean} show @param {string} [label] */
+  showWallWeaponHint(show, label = 'AK47') {
+    const el = $('hud-wall-weapon-hint');
+    if (!el) return;
+    if (!show) {
+      el.classList.add('hidden');
+      return;
+    }
+    el.classList.remove('hidden');
+    el.innerHTML = `<span class="ammo-hint-key">F</span> Take weapon <span class="wall-weapon-label">${label}</span>`;
+  }
+
   setAmmo(mag, reserve, name) {
     $('hud-ammo-mag').textContent     = mag;
     $('hud-ammo-reserve').textContent = reserve;
     if (name !== undefined) $('hud-weapon-name').textContent = name;
+  }
+
+  /** @param {'primary'|'side'} slot @param {boolean} [hasPrimary=true] */
+  setWeaponSlot(slot, hasPrimary = true) {
+    document.querySelectorAll('.weapon-slot').forEach(el => {
+      const isPrimary = el.dataset.slot === 'primary';
+      if (isPrimary && !hasPrimary) {
+        el.classList.remove('active');
+        el.classList.add('disabled');
+        return;
+      }
+      el.classList.remove('disabled');
+      el.classList.toggle('active', el.dataset.slot === slot);
+    });
   }
 
   setScore(kills, deaths) {

@@ -11,7 +11,7 @@ import {
   PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
-  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
+  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WALL_WEAPON_RADIUS, DROPPABLE_WEAPONS, WEAPONS, BOT_COUNT, BOT_LEVELS, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
   GRENADE_DAMAGE, GRENADE_RADIUS, GRENADE_MAX, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
   SYNC_INTERVAL, REMOTE_INTERP_SPEED, REMOTE_EXTRAP_S, REMOTE_SNAP_DIST,
   LODIBIDON_BOT_HIT_BONUS,
@@ -32,6 +32,7 @@ import {
 import { LodibidonController, yawToward, enemyTeam } from './lodibidon.js';
 import { ClassicMatchController } from './classic-match.js';
 import { DEFAULT_MAP_ID, getMapGameplay } from './maps/index.js';
+import { WeaponPickupManager, pickupLabelFor } from './weapon-pickups.js';
 
 export class Game {
   /**
@@ -85,6 +86,10 @@ export class Game {
     this._recentlyShot = new Map();
     this._nearAmmoChest = false;
     this._ammoChestReadyAt = 0;
+    /** @type {WeaponPickupManager|null} */
+    this.weaponPickups = null;
+    this._nearWeaponPickup = null;
+    this._pickupIdCounter = 0;
 
     // ── Timing ────────────────────────────────────────────
     this.lastFrameMs      = performance.now();
@@ -122,6 +127,7 @@ export class Game {
     this.keys      = new Set();
     this.mouseDown = false;
     this._emptyClickPlayed = false;
+    this._lastScrollWeaponSwapMs = 0;
 
     // Raycaster shared across all shots
     this.raycaster    = new THREE.Raycaster();
@@ -146,6 +152,7 @@ export class Game {
     this._onKeyUp    = this._handleKeyUp.bind(this);
     this._onMouseDn  = this._handleMouseDown.bind(this);
     this._onMouseUp  = this._handleMouseUp.bind(this);
+    this._onWheel     = this._handleWheel.bind(this);
     this._onCtxMenu  = e => e.preventDefault();
     this._onResize   = this._handleResize.bind(this);
   }
@@ -165,11 +172,16 @@ export class Game {
     this._lodibidonRoundEndSoundRound = -1;
     this._classicMatchOverActive = false;
     this._lastClassicSyncMs = 0;
+    this._pickupIdCounter = 0;
     this.classicMatch = null;
     this._playerSpawnSlot = 0;
     this._initRenderer();
     this._initScene();
     this._initMap();
+    this.weaponPickups = new WeaponPickupManager(this.scene);
+    this.weaponPickups.initWallPickups(this.map.wallWeapons);
+    this.weaponPickups.resetWallVisibility();
+    this.weaponPickups.clearGround();
     this.mapScanner = new MapScanner(this.map.width, this.map.height, MAP_SCAN_RADIUS);
 
     if (LodibidonController.isMode(this.opts)) {
@@ -249,7 +261,7 @@ export class Game {
 
   /** Called from in-game pause panel. */
   changeWeapon(key) {
-    this.weapon.equip(key);     // equip() calls setADS(false) internally
+    this.weapon.equip(key);
     this._applyADSState(false);
     this.mp?.updateWeapon(key);
   }
@@ -360,9 +372,11 @@ export class Game {
     );
     this.weapon.onAmmoChanged    = () => this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve);
     this.weapon.onWeaponChanged  = name => this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve, name);
+    this.weapon.onSlotChanged    = slot => this.hud.setWeaponSlot(slot, this.weapon.hasPrimary);
     this.weapon.onReloadStart    = () => this.hud.showReloadBar(this.weapon.def.reloadTime);
     this.weapon.onReloadComplete = () => this.hud.hideReloadBar();
     this.hud.setAmmo(this.weapon.ammo, this.weapon.reserve, this.weapon.def.name);
+    this.hud.setWeaponSlot(this.weapon.activeSlot, this.weapon.hasPrimary);
 
     // Particles
     this.particles = new ParticleSystem(this.scene);
@@ -734,7 +748,7 @@ export class Game {
     this.health = MAX_HEALTH;
     this.lodibidon.spectating = false;
     this.lodibidon.spectateTarget = null;
-    this.weapon.equip(this.weapon.key);
+    this.weapon.resetAll();
     this.grenades?.reset();
     this.hud.setHealth(MAX_HEALTH);
     this.hud.hideDeathScreen();
@@ -1273,7 +1287,7 @@ export class Game {
 
     switch (evt.type) {
       case 'shot': {
-        const snd = { assault_rifle: 'ar_shoot', shotgun: 'sg_shoot', sniper: 'sn_shoot' }[evt.weapon] ?? 'ar_shoot';
+        const snd = { assault_rifle: 'ar_shoot', ak47: 'ar_shoot', shotgun: 'sg_shoot', sniper: 'sn_shoot', pistol: 'ar_shoot' }[evt.weapon] ?? 'ar_shoot';
         this._playWorldSound(snd, { x: evt.x, y: evt.y ?? 1.2, z: evt.z }, { volume: 0.58, maxDist: 42 });
         this._playWorldMuzzleFlash(evt.x, evt.z, evt.rotY ?? 0, evt.y ?? 1.2);
         break;
@@ -1324,6 +1338,14 @@ export class Game {
             killer,
           );
         }
+        break;
+      case 'wall_weapon_taken':
+      case 'weapon_pickup_removed':
+        this.weaponPickups?.remove(evt.id);
+        if (this._nearWeaponPickup === evt.id) this._nearWeaponPickup = null;
+        break;
+      case 'weapon_ground_spawn':
+        this._spawnGroundPickupFromNetwork(evt);
         break;
       default:
         break;
@@ -1602,7 +1624,7 @@ export class Game {
     this._updateBots(delta, nowMs);
     this._syncBotsToFirebase(nowMs);
     this._updateRemotePlayers(delta);
-    if (!this._isLodibidon()) this._updateAmmoChests();
+    if (!this._isLodibidon()) this._updateInteractZones(delta);
     if (this.grenades) {
       this.grenades.update(delta);
       this.hud.setGrenades(this.grenades.count);
@@ -1646,35 +1668,147 @@ export class Game {
   //  MOVEMENT & PHYSICS
   // ═══════════════════════════════════════════════════════
 
-  _updateAmmoChests() {
+  _updateInteractZones(delta) {
     const px = this.camera.position.x;
     const pz = this.camera.position.z;
+    const showHud = this.controls.isLocked;
+
+    const nearPickup = this.weaponPickups?.findNearest(px, pz, WALL_WEAPON_RADIUS) ?? null;
+    this._nearWeaponPickup = nearPickup?.id ?? null;
+    this.weaponPickups?.setHighlight(this._nearWeaponPickup);
+    this.weaponPickups?.updatePulse(delta);
+
+    if (nearPickup) {
+      this.hud.showWallWeaponHint(showHud, nearPickup.label);
+      this.hud.showAmmoChestHint(false);
+      return;
+    }
+
+    this.hud.showWallWeaponHint(false);
+
     const chests = this.map.ammoChests ?? [];
-    let near = false;
+    let nearChest = false;
+    const chestR2 = AMMO_CHEST_RADIUS * AMMO_CHEST_RADIUS;
     for (const c of chests) {
       const dx = px - c.x;
       const dz = pz - c.z;
-      if (dx * dx + dz * dz <= AMMO_CHEST_RADIUS * AMMO_CHEST_RADIUS) {
-        near = true;
+      if (dx * dx + dz * dz <= chestR2) {
+        nearChest = true;
         break;
       }
     }
-    this._nearAmmoChest = near;
+    this._nearAmmoChest = nearChest;
     const now     = performance.now();
     const ready   = now >= this._ammoChestReadyAt;
     const leftSec = ready ? 0 : Math.ceil((this._ammoChestReadyAt - now) / 1000);
-    this.hud.showAmmoChestHint(near && this.controls.isLocked, ready, leftSec);
+    this.hud.showAmmoChestHint(nearChest && showHud, ready, leftSec);
+  }
+
+  _nextPickupId(prefix = 'drop') {
+    this._pickupIdCounter += 1;
+    return `${prefix}-${this._pickupIdCounter}-${Date.now()}`;
+  }
+
+  _spawnGroundPickup(x, z, weapon, ammo, reserve, id = null) {
+    if (!DROPPABLE_WEAPONS.has(weapon)) return null;
+    const pickupId = id ?? this._nextPickupId('drop');
+    this.weaponPickups?.spawnGround({
+      id: pickupId,
+      weapon,
+      x,
+      z,
+      ammo,
+      reserve,
+      label: pickupLabelFor(weapon),
+    });
+    return pickupId;
+  }
+
+  _spawnGroundPickupFromNetwork(evt) {
+    if (this.weaponPickups?.get(evt.id)) return;
+    this._spawnGroundPickup(evt.x, evt.z, evt.weapon, evt.ammo, evt.reserve, evt.id);
+  }
+
+  _broadcastGroundPickup(id, weapon, x, z, ammo, reserve) {
+    this.mp?.sendWorldEvent({
+      type:    'weapon_ground_spawn',
+      id,
+      weapon,
+      x,
+      z,
+      ammo,
+      reserve,
+    });
+  }
+
+  /** Drop current primary at world position (swap / G key). */
+  _dropPrimaryAt(x, z, syncId = null) {
+    const dropped = this.weapon.dropPrimary();
+    if (!dropped || !DROPPABLE_WEAPONS.has(dropped.key)) return null;
+    const id = this._spawnGroundPickup(x, z, dropped.key, dropped.ammo, dropped.reserve, syncId);
+    if (id && !syncId) {
+      this._broadcastGroundPickup(id, dropped.key, x, z, dropped.ammo, dropped.reserve);
+    }
+    return id;
+  }
+
+  _tryTakeWeaponPickup() {
+    if (!this.alive || !this.controls.isLocked || !this._nearWeaponPickup) return false;
+    const pickup = this.weaponPickups?.get(this._nearWeaponPickup);
+    if (!pickup || pickup.taken) return false;
+
+    const dropX = pickup.x + (Math.random() - 0.5) * 0.6;
+    const dropZ = pickup.z + (Math.random() - 0.5) * 0.6;
+    if (this.weapon.hasPrimary) {
+      this._dropPrimaryAt(dropX, dropZ);
+    }
+
+    const ammoState = pickup.kind === 'ground'
+      ? { key: pickup.weapon, ammo: pickup.ammo ?? WEAPONS[pickup.weapon].magSize, reserve: pickup.reserve ?? 0 }
+      : null;
+
+    this.weapon.pickupPrimary(pickup.weapon, ammoState);
+    this._applyADSState(false);
+    this.weaponPickups.remove(pickup.id);
+    this._nearWeaponPickup = null;
+    this.hud.setWeaponSlot('primary', true);
+
+    this.mp?.updateWeapon(pickup.weapon);
+    this.mp?.sendWorldEvent({ type: 'weapon_pickup_removed', id: pickup.id });
+    sound.play('ui_click', { volume: 0.65, pitch: 1.08 });
+    return true;
+  }
+
+  _tryDropWeapon() {
+    if (!this.alive || !this.controls.isLocked || !this.weapon.hasPrimary) return;
+    if (this.grenades?.isPrimed) return;
+
+    this.camera.getWorldDirection(this._camDir);
+    this._camDir.y = 0;
+    if (this._camDir.lengthSq() < 0.001) this._camDir.set(0, 0, -1);
+    this._camDir.normalize();
+
+    const px = this.camera.position.x + this._camDir.x * 0.85;
+    const pz = this.camera.position.z + this._camDir.z * 0.85;
+    if (this._dropPrimaryAt(px, pz)) {
+      this.hud.setWeaponSlot('side', false);
+      sound.play('ui_click', { volume: 0.5, pitch: 0.92 });
+    }
+  }
+
+  _tryInteractF() {
+    if (this._tryTakeWeaponPickup()) return;
+    this._tryAmmoChestResupply();
   }
 
   _tryAmmoChestResupply() {
     if (!this.alive || !this.controls.isLocked || !this._nearAmmoChest) return;
     if (performance.now() < this._ammoChestReadyAt) return;
-    const magFull = this.weapon.ammo === this.weapon.def.magSize;
-    const resFull = this.weapon.reserve === this.weapon.def.reserve;
+    const ammoFull     = !this.weapon.needsResupply();
     const grenadesFull = (this.grenades?.count ?? 0) >= GRENADE_MAX;
-    if (magFull && resFull && grenadesFull) return;
+    if (ammoFull && grenadesFull) return;
 
-    if (!magFull || !resFull) this.weapon.refillAmmo();
+    if (!ammoFull) this.weapon.refillAmmo();
     if (!grenadesFull) {
       this.grenades?.refillToMax();
       this.hud.setGrenades(this.grenades.count);
@@ -1992,7 +2126,7 @@ export class Game {
   _respawn() {
     this.health = MAX_HEALTH;
     this.alive  = true;
-    this.weapon.equip(this.weapon.key);   // resets ammo via equip, fires callbacks
+    this.weapon.resetAll();   // resets ammo via equip, fires callbacks
     this.grenades?.reset();
     this.hud.setGrenades(this.grenades?.count ?? 0);
 
@@ -2174,6 +2308,7 @@ export class Game {
     document.addEventListener('keyup',      this._onKeyUp, true);
     document.addEventListener('mousedown',  this._onMouseDn);
     document.addEventListener('mouseup',    this._onMouseUp);
+    document.addEventListener('wheel',      this._onWheel, { passive: false });
     document.addEventListener('contextmenu', this._onCtxMenu);
   }
 
@@ -2182,6 +2317,7 @@ export class Game {
     document.removeEventListener('keyup',      this._onKeyUp, true);
     document.removeEventListener('mousedown',  this._onMouseDn);
     document.removeEventListener('mouseup',    this._onMouseUp);
+    document.removeEventListener('wheel',      this._onWheel, { passive: false });
     document.removeEventListener('contextmenu', this._onCtxMenu);
     window.removeEventListener('resize',       this._onResize);
   }
@@ -2201,8 +2337,17 @@ export class Game {
     this.keys.add(e.code);
     if (!this.controls.isLocked || !this.alive) return;
     if (e.code === 'KeyR') this.weapon.reload();
-    if (e.code === 'KeyF') this._tryAmmoChestResupply();
+    if (e.code === 'KeyF') this._tryInteractF();
+    if (e.code === 'KeyG' && !e.repeat) this._tryDropWeapon();
     if (e.code === 'KeyE' && !e.repeat) this.grenades?.tryPrime();
+    if (e.code === 'Digit1' || e.code === 'Numpad1') {
+      e.preventDefault();
+      if (this.weapon.hasPrimary) this._switchWeaponSlot('primary');
+    }
+    if (e.code === 'Digit2' || e.code === 'Numpad2') {
+      e.preventDefault();
+      this._switchWeaponSlot('side');
+    }
   }
 
   _handleKeyUp(e) {
@@ -2254,6 +2399,25 @@ export class Game {
       this._emptyClickPlayed = false;
     }
     if (e.button === 2 && this.opts.adsMode === 'hold' && this.weapon.isADS) this._toggleADS();
+  }
+
+  _handleWheel(e) {
+    if (!this.running || !this.alive || !this.controls?.isLocked) return;
+    e.preventDefault();
+    const now = performance.now();
+    if (now - this._lastScrollWeaponSwapMs < 500) return;
+    this._lastScrollWeaponSwapMs = now;
+    const next = this.weapon.activeSlot === 'primary' || !this.weapon.hasPrimary
+      ? 'side'
+      : 'primary';
+    this._switchWeaponSlot(next);
+  }
+
+  /** @param {'primary'|'side'} slot */
+  _switchWeaponSlot(slot) {
+    if (slot === 'primary' && !this.weapon.hasPrimary) return;
+    this.weapon.switchToSlot(slot);
+    this._applyADSState(false);
   }
 
   _handleResize() {

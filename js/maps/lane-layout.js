@@ -76,6 +76,30 @@ export function standardAmmoChests() {
   ];
 }
 
+/** Wall-mounted pickups — unique AK47 spawns. */
+export function standardWallWeapons() {
+  return [
+    {
+      id:     'wall-ak-left',
+      x:      wx(GX_L2) - 1.15,
+      y:      1.48,
+      z:      W_LANE_Z - 5,
+      rotY:   -Math.PI / 2,
+      weapon: 'ak47',
+      label:  'AK47',
+    },
+    {
+      id:     'wall-ak-right',
+      x:      wx(GX_R1) + 1.15,
+      y:      1.48,
+      z:      W_LANE_Z + 5,
+      rotY:   Math.PI / 2,
+      weapon: 'ak47',
+      label:  'AK47',
+    },
+  ];
+}
+
 export function standardLanes() {
   return [
     {
@@ -145,6 +169,7 @@ export function makeTriLaneMap(overrides = {}) {
     doors:       standardDoors(),
     spawnPoints: standardSpawnPoints(),
     ammoChests:  standardAmmoChests(),
+    wallWeapons: standardWallWeapons(),
     lanes:       standardLanes(),
     lodibidonCenter: lod.center,
     lodibidonSpawns: lod.spawns,

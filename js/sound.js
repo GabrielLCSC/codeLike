@@ -283,18 +283,22 @@ class SoundManager {
   playShoot(weaponKey, { isADS = false } = {}) {
     const map = {
       assault_rifle: 'ar_shoot',
+      ak47:          'ar_shoot',
       shotgun:       'sg_shoot',
       sniper:        'sn_shoot',
+      pistol:        'ar_shoot',
     };
     const sndKey = map[weaponKey] ?? 'ar_shoot';
+    const pistol = weaponKey === 'pistol';
+    const ak47   = weaponKey === 'ak47';
 
     // Stop previous shot sound for this weapon (re-trigger)
     const prev = this._shootSources?.get(weaponKey);
     if (prev) { try { prev.stop(); } catch {} }
 
     const src = this.play(sndKey, {
-      volume: isADS ? 0.45 : 0.62,
-      pitch:  isADS ? 0.92 : 1.0,
+      volume: pistol ? 0.48 : ak47 ? 0.58 : (isADS ? 0.45 : 0.62),
+      pitch:  pistol ? 1.12 : ak47 ? 0.94 : (isADS ? 0.92 : 1.0),
     });
     if (!this._shootSources) this._shootSources = new Map();
     if (src) this._shootSources.set(weaponKey, src);
@@ -494,8 +498,10 @@ class SoundManager {
   playReload(weaponKey, { volume = 0.8 } = {}) {
     const map = {
       assault_rifle: 'reload_ar',
+      ak47:          'reload_ar',
       shotgun:       'reload_sg',
       sniper:        'reload_sn',
+      pistol:        'reload',
     };
     const key = map[weaponKey] ?? 'reload';
     if (!this._buffers.has(key)) this.play('reload', { volume });

@@ -8,7 +8,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import * as THREE  from 'three';
-import { WEAPONS } from './config.js';
+import { WEAPONS, SIDE_WEAPON_KEY } from './config.js';
 import { sound }   from './sound.js';
 
 // ── Weapon part tables ───────────────────────────────────────
@@ -60,6 +60,23 @@ const GUN_PARTS = {
     ['box', 'metal', [0.006, 0.020, 0.045],     [ 0.030,  0.000, -0.005]],
     // Front sight post
     ['box', 'metal', [0.007, 0.022, 0.007],     [ 0,      0.055, -0.328]],
+  ],
+
+  // ── AK47 — wood furniture, curved mag, stamped receiver ─
+  ak47: [
+    ['box', 'body',  [0.052, 0.048, 0.290],     [ 0,      0.000,  0.000]],
+    ['box', 'metal', [0.048, 0.014, 0.270],     [ 0,      0.032,  0.000]],
+    ['cyl', 'metal', [0.011, 0.014, 0.280, 8],  [ 0,      0.030, -0.200]],
+    ['box', 'metal', [0.018, 0.018, 0.032],     [ 0,      0.030, -0.356]],
+    ['box', 'stock', [0.042, 0.038, 0.160],     [ 0,      0.006,  0.248]],
+    ['box', 'stock', [0.048, 0.052, 0.022],     [ 0,      0.006,  0.328]],
+    ['box', 'body',  [0.044, 0.040, 0.155],     [ 0,      0.010, -0.125]],
+    ['box', 'body',  [0.034, 0.082, 0.046],     [ 0,     -0.068,  0.095]],
+    ['box', 'body',  [0.030, 0.072, 0.040],     [ 0,     -0.088,  0.040], [0.38, 0, 0.06]],
+    ['box', 'body',  [0.028, 0.058, 0.036],     [ 0,     -0.118,  0.058], [0.52, 0, 0.10]],
+    ['box', 'metal', [0.030, 0.008, 0.044],     [ 0,     -0.042,  0.072]],
+    ['box', 'metal', [0.008, 0.024, 0.050],     [ 0.028,  0.002, -0.010]],
+    ['box', 'metal', [0.007, 0.020, 0.007],     [ 0,      0.048, -0.340]],
   ],
 
   // ── Mossberg 500-style pump-action shotgun ──────────────
@@ -150,13 +167,33 @@ const GUN_PARTS = {
     // Bipod crossbar
     ['box', 'metal', [0.044, 0.008, 0.006],      [ 0,     -0.020, -0.280]],
   ],
+
+  // ── Compact sidearm (always equipped in slot 2) ─────────
+  pistol: [
+    // Slide
+    ['box', 'body',  [0.036, 0.038, 0.110],     [ 0,      0.014, -0.028]],
+    // Barrel
+    ['cyl', 'metal', [0.007, 0.008, 0.048, 8],  [ 0,      0.018, -0.092]],
+    // Front sight
+    ['box', 'metal', [0.008, 0.012, 0.008],     [ 0,      0.036, -0.072]],
+    // Rear sight
+    ['box', 'metal', [0.010, 0.010, 0.008],     [ 0,      0.034,  0.018]],
+    // Grip
+    ['box', 'body',  [0.030, 0.082, 0.032],     [ 0,     -0.048,  0.028]],
+    // Trigger guard
+    ['box', 'metal', [0.028, 0.007, 0.040],     [ 0,     -0.018,  0.004]],
+    // Magazine
+    ['box', 'body',  [0.022, 0.055, 0.028],     [ 0,     -0.038,  0.038]],
+  ],
 };
 
 // Muzzle flash position (bore axis) for each weapon, in group-local space
 const FLASH_OFFSET = {
   assault_rifle: new THREE.Vector3(0,  0.036, -0.356),
+  ak47:          new THREE.Vector3(0,  0.030, -0.368),
   shotgun:       new THREE.Vector3(0,  0.018, -0.331),
   sniper:        new THREE.Vector3(0,  0.032, -0.473),
+  pistol:        new THREE.Vector3(0,  0.022, -0.128),
 };
 
 // Rest position of the weapon group in camera space (combat — crosshair unchanged)
@@ -178,11 +215,17 @@ export class WeaponSystem {
     this._baseFov = baseFov;
     this._adsMode = adsMode;
 
-    // ── Weapon state ─────────────────────────────────────
-    this.key      = initialKey;
-    this.def      = WEAPONS[initialKey];
-    this.ammo     = this.def.magSize;
-    this.reserve  = this.def.reserve;
+    // ── Dual-slot weapon state ───────────────────────────
+    this._primaryKey = initialKey;
+    this._loadoutKey = initialKey;
+    this._sideKey    = SIDE_WEAPON_KEY;
+    /** @type {'primary'|'side'} */
+    this._activeSlot = 'primary';
+    this._states = {
+      primary: this._freshSlotState(initialKey),
+      side:    this._freshSlotState(SIDE_WEAPON_KEY),
+    };
+
     this.reloading = false;
     this.isADS    = false;
     this.targetFov = baseFov;
@@ -217,10 +260,63 @@ export class WeaponSystem {
     this.onReloadComplete = null;
     /** Called after equip() with the new weapon name. */
     this.onWeaponChanged  = null;
+    /** Called after slot swap: 'primary' | 'side'. */
+    this.onSlotChanged    = null;
     /** Called after each shot: (muzzleWorldPos, muzzleWorldDir) => void */
     this.onMuzzleEffects = null;
 
-    this._buildModel(initialKey);
+    this._buildModel(this.key);
+  }
+
+  // ── Active slot accessors ──────────────────────────────────
+
+  get key()     { return this._states[this._activeSlot].key; }
+  get def()     { return WEAPONS[this.key]; }
+  get ammo()    { return this._states[this._activeSlot].ammo; }
+  set ammo(v)   { this._states[this._activeSlot].ammo = v; }
+  get reserve() { return this._states[this._activeSlot].reserve; }
+  set reserve(v){ this._states[this._activeSlot].reserve = v; }
+  get primaryKey() { return this._primaryKey; }
+  get activeSlot() { return this._activeSlot; }
+  get hasPrimary() { return this._primaryKey != null; }
+
+  _freshSlotState(key) {
+    const d = WEAPONS[key];
+    return { key, ammo: d.magSize, reserve: d.reserve };
+  }
+
+  _cancelReload() {
+    clearTimeout(this._reloadTimer);
+    this.reloading     = false;
+    this._reloadAnimOn = false;
+  }
+
+  /** True if any slot is below full ammo/reserve. */
+  needsResupply() {
+    if (this._primaryKey) {
+      const st = this._states.primary;
+      const d  = WEAPONS[st.key];
+      if (st.ammo < d.magSize || st.reserve < d.reserve) return true;
+    }
+    const st = this._states.side;
+    const d  = WEAPONS[st.key];
+    return st.ammo < d.magSize || st.reserve < d.reserve;
+  }
+
+  /** Swap between loadout primary (1) and side pistol (2). */
+  switchToSlot(slot) {
+    if (slot !== 'primary' && slot !== 'side') return;
+    if (slot === 'primary' && !this._primaryKey) return;
+    if (slot === this._activeSlot) return;
+    this._cancelReload();
+    this._activeSlot = slot;
+    this.setADS(false);
+    this._sprintBlend = 0;
+    this._buildModel(this.key);
+    this.onReloadComplete?.();
+    this.onAmmoChanged?.();
+    this.onWeaponChanged?.(this.def.name);
+    this.onSlotChanged?.(slot);
   }
 
   // ── Read-only queries ──────────────────────────────────────
@@ -277,13 +373,13 @@ export class WeaponSystem {
     sound.play('empty_click', { volume: 0.6 });
   }
 
-  /** Full mag + full reserve (ammo chest / resupply). */
+  /** Full mag + full reserve for every slot (ammo chest / resupply). */
   refillAmmo() {
-    clearTimeout(this._reloadTimer);
-    this.reloading     = false;
-    this._reloadAnimOn = false;
-    this.ammo          = this.def.magSize;
-    this.reserve       = this.def.reserve;
+    this._cancelReload();
+    if (this._primaryKey) {
+      this._states.primary = this._freshSlotState(this._primaryKey);
+    }
+    this._states.side = this._freshSlotState(this._sideKey);
     this.onReloadComplete?.();
     this.onAmmoChanged?.();
   }
@@ -308,23 +404,88 @@ export class WeaponSystem {
     }, this.def.reloadTime);
   }
 
-  /** Swap weapon: rebuilds model, resets ammo to a fresh mag. */
+  /** Swap primary loadout weapon; keeps sidearm state. */
   equip(key) {
-    if (!WEAPONS[key]) return;
-    clearTimeout(this._reloadTimer);
-    this.key       = key;
-    this.def       = WEAPONS[key];
-    this.ammo      = this.def.magSize;
-    this.reserve   = this.def.reserve;
-    this.reloading     = false;
-    this._reloadAnimOn = false;
-    this.setADS(false);
-    this._sprintBlend  = 0;
+    if (!WEAPONS[key] || key === SIDE_WEAPON_KEY) return;
+    this._cancelReload();
+    this._primaryKey = key;
+    this._states.primary = this._freshSlotState(key);
+    if (this._activeSlot === 'primary') {
+      this.setADS(false);
+      this._sprintBlend = 0;
+      this._buildModel(key);
+      this.onReloadComplete?.();
+      this.onAmmoChanged?.();
+      this.onWeaponChanged?.(this.def.name);
+    }
+  }
 
+  /** Pick up a world / wall weapon — full mag unless ammoState provided. */
+  pickupPrimary(key, ammoState = null) {
+    if (!WEAPONS[key] || key === SIDE_WEAPON_KEY) return;
+    this._cancelReload();
+    this._primaryKey = key;
+    this._activeSlot = 'primary';
+    this._states.primary = ammoState ?? this._freshSlotState(key);
+    this.setADS(false);
+    this._sprintBlend = 0;
     this._buildModel(key);
-    this.onReloadComplete?.();   // ensures reload bar is hidden
+    this.onReloadComplete?.();
     this.onAmmoChanged?.();
     this.onWeaponChanged?.(this.def.name);
+    this.onSlotChanged?.('primary');
+  }
+
+  /**
+   * Drop primary weapon — returns state for world pickup, switches to pistol.
+   * @returns {{ key: string, ammo: number, reserve: number }|null}
+   */
+  dropPrimary() {
+    if (!this._primaryKey) return null;
+    const state = {
+      key:     this._primaryKey,
+      ammo:    this._states.primary.ammo,
+      reserve: this._states.primary.reserve,
+    };
+    this._cancelReload();
+    this._primaryKey = null;
+    if (this._activeSlot === 'primary') {
+      this._activeSlot = 'side';
+      this.setADS(false);
+      this._sprintBlend = 0;
+      this._buildModel(this.key);
+      this.onReloadComplete?.();
+      this.onAmmoChanged?.();
+      this.onWeaponChanged?.(this.def.name);
+      this.onSlotChanged?.('side');
+    }
+    return state;
+  }
+
+  /** @returns {{ key: string, ammo: number, reserve: number }|null} */
+  getPrimaryState() {
+    if (!this._primaryKey) return null;
+    return {
+      key:     this._primaryKey,
+      ammo:    this._states.primary.ammo,
+      reserve: this._states.primary.reserve,
+    };
+  }
+
+  /** Reset both slots to full (respawn / round reset). */
+  resetAll() {
+    this._cancelReload();
+    this._primaryKey = this._loadoutKey;
+    this._activeSlot = 'primary';
+    this._states.primary = this._freshSlotState(this._loadoutKey);
+    this._states.side    = this._freshSlotState(this._sideKey);
+    this.setADS(false);
+    this._sprintBlend = 0;
+    this._buildModel(this.key);
+    this.onReloadComplete?.();
+    this.onAmmoChanged?.();
+    this.onWeaponChanged?.(this.def.name);
+    this.onSlotChanged?.(this._activeSlot);
   }
 
   toggleADS() { this.setADS(!this.isADS); }

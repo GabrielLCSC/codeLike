@@ -38,6 +38,8 @@ export const MAX_HEALTH = 100;
 
 /** World distance (XZ) to use an ammo chest. */
 export const AMMO_CHEST_RADIUS = 2.75;
+/** World distance (XZ) to take a wall-mounted weapon. */
+export const WALL_WEAPON_RADIUS = 2.5;
 /** Cooldown after resupplying at a chest (ms). */
 export const AMMO_CHEST_COOLDOWN_MS = 59000;
 
@@ -96,6 +98,24 @@ export const WEAPONS = {
     barrelColor: 0x111114,   // near-black metal
     stockColor:  0x1a1a1e,   // same polymer as body
   },
+  ak47: {
+    name:        'AK47',
+    bodyDamage:  25,
+    headDamage:  50,
+    fireRate:    600,
+    reloadTime:  2400,
+    magSize:     30,
+    reserve:     90,
+    spread:      0.019,
+    pellets:     1,
+    automatic:   true,
+    zoom:        1.15,
+    recoilZ:     0.026,
+    recoilRotX:  0.058,
+    bodyColor:   0x3a2818,   // wood handguard
+    barrelColor: 0x141414,
+    stockColor:  0x5c4030,   // wood stock
+  },
   shotgun: {
     name:        'SHOTGUN',
     bodyDamage:  MAX_HEALTH,        // all 8 pellets on body = kill (12.5 each)
@@ -133,7 +153,31 @@ export const WEAPONS = {
     stockColor:  0x181c18,   // dark tactical stock
     scopeColor:  0x111114,   // scope black
   },
+  pistol: {
+    name:        'PISTOL',
+    bodyDamage:  25,   // 4 body shots @ 100 HP
+    headDamage:  50,   // 2 head shots
+    fireRate:    360,
+    reloadTime:  1400,
+    magSize:     8,
+    reserve:     24,
+    spread:      0.028,
+    pellets:     1,
+    automatic:   false,
+    zoom:        1.0,
+    recoilZ:     0.014,
+    recoilRotX:  0.032,
+    bodyColor:   0x222226,
+    barrelColor: 0x141418,
+    stockColor:  0x222226,
+  },
 };
+
+/** Sidearm every player carries alongside their loadout primary. */
+export const SIDE_WEAPON_KEY = 'pistol';
+
+/** Primary weapons that can be dropped / picked up in the world. */
+export const DROPPABLE_WEAPONS = new Set(['assault_rifle', 'ak47', 'shotgun', 'sniper']);
 
 // ─── BOT CONFIG (AI implementation: js/bots/) ─────────────────
 export const BOT_COUNT      = 3;
