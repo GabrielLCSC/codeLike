@@ -11,8 +11,9 @@ import {
   PLAYER_HEIGHT, PLAYER_SPEED, SPRINT_MULT,
   GRAVITY, JUMP_FORCE,
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
-  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
+  MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
   GRENADE_DAMAGE, GRENADE_RADIUS, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
+  SYNC_INTERVAL, REMOTE_INTERP_SPEED, REMOTE_EXTRAP_S, REMOTE_SNAP_DIST,
   LODIBIDON_BOT_HIT_BONUS,
 } from './config.js';
 import { MapScanner } from './map-scanner.js';
@@ -86,7 +87,6 @@ export class Game {
     this.lastFrameMs      = performance.now();
     this.lastDamageMs     = -9999;
     this.lastSyncMs       = -9999;
-    this.lastRotSyncMs    = -9999;
     this._lastSyncGx      = -999;
     this._lastSyncGz      = -999;
     this._tabHeld         = false;
@@ -1254,6 +1254,33 @@ export class Game {
     return keys[Math.floor(Math.random() * keys.length)];
   }
 
+  /** Push a network snapshot into a remote player proxy (velocity for smoothing). */
+  _applyRemoteSnapshot(rp, data) {
+    const x = data.x ?? 0;
+    const z = data.z ?? 0;
+    const ts = data.ts ?? Date.now();
+
+    if (rp.snapshotTs != null && ts > rp.snapshotTs) {
+      const dt = (ts - rp.snapshotTs) / 1000;
+      if (dt > 0.001 && dt < 1.5) {
+        rp.velX = (x - rp.snapshotX) / dt;
+        rp.velZ = (z - rp.snapshotZ) / dt;
+        const maxV = PLAYER_SPEED * SPRINT_MULT * 1.15;
+        const spd = Math.hypot(rp.velX, rp.velZ);
+        if (spd > maxV) {
+          rp.velX = (rp.velX / spd) * maxV;
+          rp.velZ = (rp.velZ / spd) * maxV;
+        }
+      }
+    }
+
+    rp.snapshotX = x;
+    rp.snapshotZ = z;
+    rp.snapshotTs = ts;
+    rp.targetPos.set(x, 0, z);
+    rp.targetRotY = data.rotY ?? rp.targetRotY ?? 0;
+  }
+
   _setupMultiplayer() {
     this.mp.onPlayerUpdate = (uid, data) => {
       if (this.remotePlayers.has(uid)) {
@@ -1265,8 +1292,7 @@ export class Game {
         // skips the kill block — preventing the kill from counting multiple times.
         const wasAlive = rp.data.alive;
         rp.data       = data;
-        rp.targetPos.set(data.x, 0, data.z);
-        rp.targetRotY = data.rotY ?? 0;
+        this._applyRemoteSnapshot(rp, data);
         rp.mesh.visible = !!data.alive;
 
         if (wasAlive && !data.alive) {
@@ -1290,7 +1316,7 @@ export class Game {
         );
         mesh.position.set(data.x ?? 0, 0, data.z ?? 0);
         this.scene.add(mesh);
-        this.remotePlayers.set(uid, {
+        const rp = {
           mesh,
           rig,
           healthBar,
@@ -1298,7 +1324,13 @@ export class Game {
           targetPos:  new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
           targetRotY: data.rotY ?? 0,
           prevPos:    new THREE.Vector3(data.x ?? 0, 0, data.z ?? 0),
-        });
+          velX:       0,
+          velZ:       0,
+          snapshotX:  data.x ?? 0,
+          snapshotZ:  data.z ?? 0,
+          snapshotTs: data.ts ?? Date.now(),
+        };
+        this.remotePlayers.set(uid, rp);
       }
     };
 
@@ -1413,14 +1445,10 @@ export class Game {
     this.particles.update(delta);
 
     if (this.mapScanner) {
-      const cellChanged = this.mapScanner.scan(
-        this.camera.position.x,
-        this.camera.position.z,
-      );
-      const rotDue = nowMs - this.lastRotSyncMs > 220;
-      if (this.mp && (cellChanged || rotDue)) {
-        this.lastSyncMs    = nowMs;
-        this.lastRotSyncMs = nowMs;
+      this.mapScanner.scan(this.camera.position.x, this.camera.position.z);
+
+      if (this.mp && nowMs - this.lastSyncMs >= SYNC_INTERVAL) {
+        this.lastSyncMs = nowMs;
         const pos = this.camera.position;
         this.camera.getWorldDirection(this._camDir);
         const dir = this._camDir;
@@ -1858,12 +1886,30 @@ export class Game {
   }
 
   _updateRemotePlayers(delta) {
+    const smooth = 1 - Math.exp(-REMOTE_INTERP_SPEED * delta);
+    const snapDist2 = REMOTE_SNAP_DIST * REMOTE_SNAP_DIST;
+
     this.remotePlayers.forEach(rp => {
       if (!rp.mesh.visible) return;
-      rp.mesh.position.lerp(rp.targetPos, 0.28);
-      rp.mesh.rotation.y = THREE.MathUtils.lerp(rp.mesh.rotation.y, rp.targetRotY, 0.28);
 
-      // Name labels + animation
+      const predX = rp.targetPos.x + (rp.velX ?? 0) * REMOTE_EXTRAP_S;
+      const predZ = rp.targetPos.z + (rp.velZ ?? 0) * REMOTE_EXTRAP_S;
+
+      const dx = predX - rp.mesh.position.x;
+      const dz = predZ - rp.mesh.position.z;
+      if (dx * dx + dz * dz > snapDist2) {
+        rp.mesh.position.x = predX;
+        rp.mesh.position.z = predZ;
+      } else {
+        rp.mesh.position.x += dx * smooth;
+        rp.mesh.position.z += dz * smooth;
+      }
+
+      let rotDiff = rp.targetRotY - rp.mesh.rotation.y;
+      while (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
+      while (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
+      rp.mesh.rotation.y += rotDiff * (1 - Math.exp(-18 * delta));
+
       if (rp.rig && rp.prevPos) {
         this._animateRemotePlayer(rp, delta);
       }

@@ -162,6 +162,10 @@ export const BOT_LEVELS = {
 // ─── MULTIPLAYER ─────────────────────────────────────────────
 export const SYNC_INTERVAL    = 50;   // ms between position syncs
 export const BOT_SYNC_INTERVAL = 80;  // ms — host bot snapshot rate (multi)
+/** Remote player render smoothing (MP). */
+export const REMOTE_INTERP_SPEED = 16;  // higher = snappier catch-up
+export const REMOTE_EXTRAP_S     = 0.07; // short dead-reckoning ahead of last packet
+export const REMOTE_SNAP_DIST    = 5;   // teleport if interpolation lag exceeds this
 export const MAX_PLAYERS      = 4;
 
 // ─── FIREBASE CONFIG ──────────────────────────────────────────
