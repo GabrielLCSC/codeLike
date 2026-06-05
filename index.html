@@ -98,6 +98,25 @@
       </div>
     </div>
 
+    <!-- GAME TYPE (after solo / multi chosen) -->
+    <div id="screen-gametype" class="screen">
+      <div class="screen-header">
+        <button class="back-btn" id="btn-back-gametype">← BACK</button>
+        <h2 id="gametype-title">SOLO — GAME TYPE</h2>
+        <div class="header-rule"></div>
+      </div>
+      <p class="gametype-hint">Choose a ruleset for this match.</p>
+      <nav class="menu-nav gametype-nav">
+        <button class="menu-btn" id="btn-gametype-classic">
+          <span class="btn-bracket">[</span> CLASSIC <span class="btn-bracket">]</span>
+        </button>
+        <button class="menu-btn" id="btn-gametype-lodibidon">
+          <span class="btn-bracket">[</span> LODI BIDON <span class="btn-bracket">]</span>
+        </button>
+      </nav>
+      <p class="gametype-sub">Classic — respawn deathmatch · Lodibidon — 2v2 rounds, one life</p>
+    </div>
+
     <!-- LOADOUT / GUN SELECT SCREEN -->
     <div id="screen-loadout" class="screen">
       <div class="screen-header">
@@ -143,6 +162,14 @@
           <div class="gun-ammo">5 / 25</div>
         </div>
 
+      </div>
+
+      <div class="bot-count-row" id="lodibidon-team-row" style="display:none">
+        <span class="bot-count-label">YOUR TEAM</span>
+        <div class="team-btns" id="team-btn-group">
+          <button type="button" class="team-btn active" data-team="alpha">ALPHA</button>
+          <button type="button" class="team-btn" data-team="omega">OMEGA</button>
+        </div>
       </div>
 
       <!-- Bot count + difficulty -->
@@ -260,7 +287,15 @@
         <h2>ROOM: <span id="lbl-room-code" class="room-code-display">----</span></h2>
         <div class="header-rule"></div>
       </div>
-      <p class="lobby-hint">Share this code with friends. Up to 4 players.</p>
+      <p class="lobby-hint" id="lobby-hint-ffa">Share this code with friends. Up to 4 players.</p>
+      <p class="lobby-hint hidden" id="lobby-hint-lodibidon">Lodibidon 2v2 — pick ALPHA or OMEGA (max 2 per team). Empty slots are filled by bots.</p>
+      <div class="lobby-team-pick hidden" id="lobby-team-pick">
+        <span class="bot-count-label">YOUR TEAM</span>
+        <div class="team-btns">
+          <button type="button" class="team-btn active" id="lobby-team-alpha" data-team="alpha">ALPHA</button>
+          <button type="button" class="team-btn" id="lobby-team-omega" data-team="omega">OMEGA</button>
+        </div>
+      </div>
       <div id="lobby-player-list" class="lobby-player-list"></div>
       <div class="lobby-actions">
         <button class="confirm-btn" id="btn-start-game" style="display:none">START GAME →</button>
@@ -329,6 +364,32 @@
       <span class="score-sep" id="hud-room-tag"></span>
     </div>
 
+    <!-- Lodibidon mode HUD -->
+    <div id="hud-lodibidon" class="hidden">
+      <div id="lodibidon-scoreline">
+        <span class="lod-team lod-alpha">ALPHA <strong id="lod-score-alpha">0</strong></span>
+        <span class="lod-round">R<span id="lod-round-num">1</span></span>
+        <span class="lod-team lod-omega">OMEGA <strong id="lod-score-omega">0</strong></span>
+      </div>
+      <div id="lodibidon-timer" class="hidden">2:00</div>
+      <div id="lodibidon-capture" class="hidden">
+        <span id="lod-capture-label">CAPTURE</span>
+        <div id="lod-capture-track"><div id="lod-capture-fill"></div></div>
+      </div>
+      <div id="lodibidon-flag-hint" class="hidden">FLAG ACTIVE — CAPTURE THE CENTER</div>
+      <div id="lodibidon-alive" class="hidden">2V2</div>
+    </div>
+
+    <div id="lodibidon-prep" class="hidden">
+      <div class="lod-prep-num" id="lod-prep-num">3</div>
+      <p class="lod-prep-sub">Look around — movement locked</p>
+    </div>
+
+    <div id="lodibidon-spectate" class="hidden">
+      <p>Killed by <span id="lod-spectate-killer">Enemy</span></p>
+      <p>Spectating <strong id="lod-spectate-name">Teammate</strong></p>
+    </div>
+
     <!-- Top-right: kill feed -->
     <div id="kill-feed"></div>
 
@@ -344,19 +405,7 @@
     <!-- Match scoreboard (hold Tab — solo bots + multiplayer) -->
     <div id="hud-leaderboard" class="hidden">
       <div class="lb-panel">
-        <div class="lb-title">MATCH LEADERBOARD</div>
-        <table class="lb-table">
-          <thead>
-            <tr>
-              <th>Player</th>
-              <th>K</th>
-              <th>A</th>
-              <th>D</th>
-              <th>K/D</th>
-            </tr>
-          </thead>
-          <tbody id="hud-leaderboard-body"></tbody>
-        </table>
+        <div id="hud-leaderboard-mount"></div>
         <div class="lb-hint">Hold Tab</div>
       </div>
     </div>
@@ -367,6 +416,34 @@
   </div>
 
   <!-- ═══════════════════════════════════════ OVERLAYS ══════ -->
+
+  <!-- Lodibidon round / match end (outside #hud so z-index beats pause overlay) -->
+  <div id="lodibidon-round-end" class="hidden">
+    <h2 id="lod-round-end-title">ROUND WON</h2>
+    <p id="lod-round-end-reason">Elimination</p>
+  </div>
+
+  <div id="lodibidon-match-over" class="hidden">
+    <h2 id="lod-match-over-banner">VICTORY</h2>
+    <p class="lod-match-score" id="lod-match-final-score">Rounds — 6 : 4</p>
+    <div class="lod-match-teams-grid">
+      <div class="lod-match-team-block" id="lod-match-block-alpha">
+        <h3 id="lod-match-hdr-alpha">ALPHA <span class="lod-team-result"></span></h3>
+        <table class="lod-match-table">
+          <thead><tr><th>Player</th><th>K</th><th>D</th><th>A</th><th>K/D</th></tr></thead>
+          <tbody id="lod-match-body-alpha"></tbody>
+        </table>
+      </div>
+      <div class="lod-match-team-block" id="lod-match-block-omega">
+        <h3 id="lod-match-hdr-omega">OMEGA <span class="lod-team-result"></span></h3>
+        <table class="lod-match-table">
+          <thead><tr><th>Player</th><th>K</th><th>D</th><th>A</th><th>K/D</th></tr></thead>
+          <tbody id="lod-match-body-omega"></tbody>
+        </table>
+      </div>
+    </div>
+    <button class="confirm-btn" id="btn-lodibidon-exit" disabled>QUIT (5)</button>
+  </div>
 
   <!-- Pointer-lock / pause -->
   <div id="pointer-lock-overlay" class="hidden">

@@ -24,8 +24,9 @@ export class BotSoldierEntity {
    * @param {THREE.Scene} scene
    * @param {number} index
    * @param {{ x: number, z: number }} spawnPos
+   * @param {{ bodyTeam?: string, labelRole?: 'ally'|'enemy' }} [visual]
    */
-  constructor(scene, index, spawnPos) {
+  constructor(scene, index, spawnPos, visual = {}) {
     this.scene    = scene;
     this.index    = index;
     this.spawnPos = { ...spawnPos };
@@ -36,8 +37,9 @@ export class BotSoldierEntity {
     this.phase     = 'advance';
 
     const { mesh, rig, healthBar } = buildCharacterMesh({
-      team: 'enemy',
-      name: `BOT-${index + 1}`,
+      team:      visual.bodyTeam ?? 'enemy',
+      labelRole: visual.labelRole ?? 'enemy',
+      name:      `BOT-${index + 1}`,
       showHealthBar: true,
     });
     this.mesh       = mesh;
@@ -78,11 +80,13 @@ export class BotSoldierEntity {
     );
   }
 
-  updateHealthBar(camera, map) {
-    if (!this.alive) return;
+  updateHealthBar(camera, map, opts = {}) {
+    if (!this.alive && !opts.alwaysShow) return;
     updateCharacterOverheadUI(this.mesh, camera, map, {
       healthBar: this.healthBar,
       healthRatio: this.health / this.maxHealth,
+      visible: this.alive,
+      ...opts,
     });
   }
 
@@ -99,9 +103,10 @@ export class BotSoldierEntity {
   }
 
   /**
-   * @param {() => void} onRespawn
+   * @param {() => void} [onRespawn]
+   * @param {number} [respawnMs] — 0 disables respawn (lodibidon)
    */
-  die(onRespawn) {
+  die(onRespawn, respawnMs = BOT_RESPAWN_MS) {
     this.alive = false;
     this.mesh.visible = false;
 
@@ -123,6 +128,8 @@ export class BotSoldierEntity {
         mat.dispose();
       }
     }, 100);
+
+    if (respawnMs <= 0) return;
 
     setTimeout(() => {
       this.health = this.maxHealth;

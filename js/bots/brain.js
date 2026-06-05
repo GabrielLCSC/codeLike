@@ -9,6 +9,7 @@ import {
   BOT_DAMAGE,
   BOT_REPLAN_INTERVAL,
   BOT_REPLAN_MOVE_SQ,
+  BOT_MISS_ADVANCE_THRESHOLD,
 } from '../config.js';
 import { GridPathfinder } from './grid-path.js';
 
@@ -36,6 +37,7 @@ export class BotBrain {
     this.shootGap     = BOT_SHOOT_MIN + Math.random() * BOT_SHOOT_JITTER;
     this.burstLeft    = 0;
     this.burstPauseMs = 0;
+    this.consecutiveMisses = 0;
   }
 
   /** @deprecated alias for host-bot animation sync */
@@ -50,6 +52,12 @@ export class BotBrain {
     this.replanTimer = 0;
     this._lastGoalX  = null;
     this._lastGoalZ  = null;
+    this.consecutiveMisses = 0;
+  }
+
+  /** Push toward target after consecutive missed shots. */
+  wantsCloseIn() {
+    return this.consecutiveMisses >= BOT_MISS_ADVANCE_THRESHOLD;
   }
 
   /**
@@ -141,6 +149,9 @@ export class BotBrain {
 
     const distMul = dist < 6 ? 1 : dist < 14 ? 0.7 : 0.4;
     const hit     = Math.random() < this.hitBase * distMul;
+
+    if (hit) this.consecutiveMisses = 0;
+    else this.consecutiveMisses++;
 
     return {
       fire:     hit,

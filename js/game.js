@@ -13,6 +13,7 @@ import {
   REGEN_DELAY, REGEN_RATE, RESPAWN_TIME,
   MAX_HEALTH, AMMO_CHEST_RADIUS, AMMO_CHEST_COOLDOWN_MS, WEAPONS, BOT_COUNT, BOT_LEVELS, SYNC_INTERVAL, BOT_SYNC_INTERVAL, MAX_PIXEL_RATIO,
   GRENADE_DAMAGE, GRENADE_RADIUS, MAP_SCAN_RADIUS, SPAWN_OCCUPANCY_RADIUS, ASSIST_WINDOW_MS,
+  LODIBIDON_BOT_HIT_BONUS,
 } from './config.js';
 import { MapScanner } from './map-scanner.js';
 import { MapGenerator }  from './mapgen.js';
@@ -27,6 +28,7 @@ import {
   updateCharacterAnimation,
   updateCharacterOverheadUI,
 } from './character.js';
+import { LodibidonController, yawToward, enemyTeam } from './lodibidon.js';
 
 export class Game {
   /**
@@ -39,6 +41,8 @@ export class Game {
    *   username:    string,
    *   botCount?:   number,
    *   botLevel?:   'private'|'corporal'|'commando'|'veteran',
+   *   gameType?:   'ffa'|'lodibidon',
+   *   team?:       'alpha'|'omega',
    *   mp?:         import('./multiplayer.js').MultiplayerManager,
    * }} opts
    */
@@ -91,6 +95,7 @@ export class Game {
     /** @type {import('./map-scanner.js').MapScanner|null} */
     this.mapScanner       = null;
     this.damageFlashTimer = 0;
+    this._lastMatchSyncMs  = 0;
 
     // ── Scene objects ─────────────────────────────────────
     /** @type {Bot[]} */ this.bots = [];
@@ -105,6 +110,11 @@ export class Game {
     /** @type {ParticleSystem} */ this.particles = null;
     /** @type {GrenadeSystem}   */ this.grenades  = null;
 
+    /** @type {import('./lodibidon.js').LodibidonController|null} */
+    this.lodibidon = null;
+    /** Rotates lodibidon spawn slots each round. */
+    this._lodibidonSpawnRotation = 0;
+
     // ── Input ─────────────────────────────────────────────
     this.keys      = new Set();
     this.mouseDown = false;
@@ -115,7 +125,12 @@ export class Game {
     this._hitWorldPos = new THREE.Vector3();
     this._fwdVec      = new THREE.Vector3();
     this._rgtVec      = new THREE.Vector3();
+    this._muzzlePos   = new THREE.Vector3();
+    this._muzzleDir   = new THREE.Vector3();
     this._camDir      = new THREE.Vector3();
+    this._lodibidonMatchOverActive = false;
+    this._lodibidonLastOneVoicePlayed = false;
+    this._lodibidonRoundEndSoundRound = -1;
     this._playerSpawnSlot = 0;
     this._claimedSpawns   = new Set();
     this.raycaster.far = 80;
@@ -138,18 +153,42 @@ export class Game {
     this.bots = [];
     this.syncedBots = [];
     this.remotePlayers.clear();
+    this._lodibidonSpawnRotation = 0;
+    this._lodibidonMatchOverActive = false;
+    this._lodibidonLastOneVoicePlayed = false;
+    this._lodibidonRoundEndSoundRound = -1;
 
     this._initRenderer();
     this._initScene();
     this._initMap();
     this.mapScanner = new MapScanner(this.map.width, this.map.height, MAP_SCAN_RADIUS);
-    this._initPlayerSpawnSlot();
-    this._initPlayer();
-    this._initSystems();
-    this._bindInput();
 
-    if ((this.opts.botCount ?? 0) > 0) this._initBots(this.opts.botCount);
-    if (this.mp)              this._setupMultiplayer();
+    if (LodibidonController.isMode(this.opts)) {
+      this._initPlayer();
+      this._initSystems();
+      this.lodibidon = new LodibidonController(this);
+      if (this.mp) {
+        const me = this.mp.players.get(this.mp.uid);
+        if (me?.team) this.lodibidon.playerTeam = me.team;
+      }
+      this.hud.showLodibidonMode(true);
+      this.hud.setLodibidonScore({ alpha: 0, omega: 0 }, 1);
+      this._bindInput();
+      if (!this._isMpClient()) this._initLodibidonBots();
+      if (this.mp) this._setupMultiplayer();
+      if (!this._isMpClient()) {
+        const nowMs = performance.now();
+        this.lodibidon.startRound(nowMs);
+        this.mp?.syncMatch(this.lodibidon.buildMatchState(nowMs));
+      }
+    } else {
+      this._initPlayerSpawnSlot();
+      this._initPlayer();
+      this._initSystems();
+      this._bindInput();
+      if ((this.opts.botCount ?? 0) > 0) this._initBots(this.opts.botCount);
+      if (this.mp) this._setupMultiplayer();
+    }
 
     this.hud.show();
     document.getElementById('pointer-lock-overlay').classList.remove('hidden');
@@ -172,6 +211,11 @@ export class Game {
     this.remotePlayers.forEach(({ mesh }) => this.scene?.remove(mesh));
     this.remotePlayers.clear();
     this._claimedSpawns.clear();
+    this._lodibidonMatchOverActive = false;
+    this._lodibidonLastOneVoicePlayed = false;
+    this._lodibidonRoundEndSoundRound = -1;
+    this.lodibidon?.dispose();
+    this.lodibidon = null;
     this.particles?.dispose();
     this.renderer?.dispose();
     this.scene = null;
@@ -180,6 +224,10 @@ export class Game {
 
     document.getElementById('pointer-lock-overlay').classList.add('hidden');
     document.getElementById('death-screen').classList.add('hidden');
+    document.getElementById('lodibidon-match-over')?.classList.add('hidden');
+    document.getElementById('lodibidon-round-end')?.classList.add('hidden');
+    document.getElementById('lodibidon-spectate')?.classList.add('hidden');
+    document.getElementById('lodibidon-prep')?.classList.add('hidden');
     document.getElementById('scope-overlay').classList.add('hidden');
     document.getElementById('crosshair').classList.remove('hidden');
   }
@@ -232,12 +280,18 @@ export class Game {
     this.controls.pointerSpeed = this.opts.sensitivity * 0.42;
     this.scene.add(this.camera);
 
-    const sp = this._getSpawnPos(this._playerSpawnSlot);
-    this._placePlayerAt(sp.x, sp.z);
+    if (LodibidonController.isMode(this.opts)) {
+      const sp = this._getLodibidonPlayerSpawn();
+      this._placePlayerAtWithYaw(sp.x, sp.z, this.map.lodibidonCenter.x, this.map.lodibidonCenter.z);
+    } else {
+      const sp = this._getSpawnPos(this._playerSpawnSlot);
+      this._placePlayerAt(sp.x, sp.z);
+    }
 
     const plo = document.getElementById('pointer-lock-overlay');
     plo.addEventListener('click', () => {
-      if (this.alive && this.running) this.controls.lock();
+      if (this._isLodibidonMatchOver()) return;
+      if (this.running && (this.alive || this.lodibidon?.spectating)) this.controls.lock();
     }, { capture: true });
 
     this.controls.addEventListener('lock', () => {
@@ -247,7 +301,12 @@ export class Game {
       sound.init().then(() => sound.startAmbiance('city'));
     });
     this.controls.addEventListener('unlock', () => {
-      if (!this.alive || !this.running) return;
+      if (!this.running) return;
+      if (this._isLodibidonMatchOver()) {
+        plo.classList.add('hidden');
+        return;
+      }
+      if (!this.alive) return;
       // Tab releases pointer lock in some browsers — don't open pause/settings for that
       if (this._tabHeld) {
         plo.classList.add('hidden');
@@ -282,7 +341,7 @@ export class Game {
     // Particles
     this.particles = new ParticleSystem(this.scene);
     this.weapon.onMuzzleEffects = (pos, dir) => {
-      this.particles.spawnMuzzleSmoke(pos, dir);
+      this.particles.spawnMuzzleFlash(pos, dir);
     };
 
     this.grenades = new GrenadeSystem(this.camera, this.scene, this.weapon, {
@@ -383,13 +442,16 @@ export class Game {
   /** Live enemy positions for minimap radar sweep. */
   _collectMinimapEnemies() {
     const out = [];
+    const myTeam = this.lodibidon?.playerTeam;
     const sources = this._isMpClient() ? this.syncedBots : this.bots;
     for (const b of sources) {
       if (!b?.alive) continue;
+      if (myTeam && b.team === myTeam) continue;
       out.push({ x: b.mesh.position.x, z: b.mesh.position.z, color: '#ff4444' });
     }
     for (const rp of this.remotePlayers.values()) {
       if (!rp.mesh.visible) continue;
+      if (myTeam && rp.data.team === myTeam) continue;
       out.push({ x: rp.mesh.position.x, z: rp.mesh.position.z, color: '#4488ff' });
     }
     return out;
@@ -431,6 +493,444 @@ export class Game {
     this.camera.position.set(x, PLAYER_HEIGHT, z);
   }
 
+  _placePlayerAtWithYaw(x, z, lookX, lookZ) {
+    this._placePlayerAt(x, z);
+    this.camera.rotation.set(0, yawToward(x, z, lookX, lookZ), 0);
+  }
+
+  /** @param {'alpha'|'omega'} team */
+  _lodibidonTeamRoster(team, includeBots = true) {
+    /** @type {{ kind:'local'|'remote'|'bot', uid?:string, botIndex?:number }[]} */
+    const roster = [];
+    if (this.mp) {
+      for (const [uid, p] of [...this.mp.players.entries()]
+        .filter(([, pl]) => pl.team === team)
+        .sort(([a], [b]) => a.localeCompare(b))) {
+        roster.push({ kind: uid === this.mp.uid ? 'local' : 'remote', uid });
+      }
+    } else if (team === this.lodibidon?.playerTeam) {
+      roster.push({ kind: 'local' });
+    }
+    if (includeBots) {
+      const botSource = this._isMpClient() ? this.syncedBots : this.bots;
+      for (const bot of botSource.filter(b => b && b.team === team).sort((a, b) => a.index - b.index)) {
+        roster.push({ kind: 'bot', botIndex: bot.index });
+      }
+    }
+    return roster;
+  }
+
+  /** @param {'alpha'|'omega'} team @param {number} memberIndex */
+  _lodibidonSpawnForMember(team, memberIndex) {
+    const spawns = this.map.lodibidonSpawns[team];
+    const slot = (memberIndex + (this._lodibidonSpawnRotation ?? 0)) % spawns.length;
+    return spawns[slot];
+  }
+
+  /** @returns {{ x:number, z:number }} */
+  _getLodibidonPlayerSpawn() {
+    const team = this.lodibidon?.playerTeam ?? this.opts.team ?? 'alpha';
+    const roster = this._lodibidonTeamRoster(team, true);
+    let idx = roster.findIndex(m => m.kind === 'local');
+    if (idx < 0 && this.mp) {
+      idx = roster.findIndex(m => m.uid === this.mp.uid);
+    }
+    return this._lodibidonSpawnForMember(team, Math.max(0, idx));
+  }
+
+  /** Match-end stats grouped by team. */
+  getLodibidonMatchStats() {
+    /** @type {{ name:string, kills:number, deaths:number, assists:number, isSelf?:boolean }[]} */
+    const alpha = [];
+    /** @type {{ name:string, kills:number, deaths:number, assists:number, isSelf?:boolean }[]} */
+    const omega = [];
+    const push = (team, row) => {
+      (team === 'alpha' ? alpha : omega).push(row);
+    };
+
+    const pt = this.lodibidon?.playerTeam ?? 'alpha';
+    push(pt, {
+      name: this.username,
+      kills: this.kills,
+      deaths: this.deaths,
+      assists: 0,
+      isSelf: true,
+    });
+
+    if (this.mp) {
+      for (const [uid, p] of this.mp.players) {
+        if (uid === this.mp.uid) continue;
+        if (p.team !== 'alpha' && p.team !== 'omega') continue;
+        push(p.team, {
+          name: p.name ?? 'Player',
+          kills: p.kills ?? 0,
+          deaths: p.deaths ?? 0,
+          assists: p.assists ?? 0,
+        });
+      }
+    }
+
+    const botList = this._isMpClient() ? this.syncedBots : this.bots;
+    for (const bot of botList) {
+      if (!bot?.team) continue;
+      push(bot.team, {
+        name: `Bot-${(bot.index ?? 0) + 1}`,
+        kills: bot.kills ?? 0,
+        deaths: bot.deaths ?? 0,
+        assists: bot.assists ?? 0,
+        isBot: true,
+      });
+    }
+
+    return { alpha, omega, playerTeam: pt };
+  }
+
+  _updateLodibidonAliveHud() {
+    if (!this.lodibidon) return;
+    const phase = this.lodibidon.phase;
+    if (phase === 'prep' || phase === 'round_end' || phase === 'match_over') {
+      this.hud.setLodibidonAlive(null);
+      return;
+    }
+    const pt = this.lodibidon.playerTeam;
+    const ally = this._lodibidonTeamAliveCount(pt);
+    const enemy = this._lodibidonTeamAliveCount(enemyTeam(pt));
+    if (ally >= 2 && enemy >= 2) {
+      this.hud.setLodibidonAlive(null);
+    } else {
+      this.hud.setLodibidonAlive(ally, enemy);
+    }
+  }
+
+  _initLodibidonBots() {
+    const baseCfg = BOT_LEVELS[this.opts.botLevel ?? 'corporal'] ?? BOT_LEVELS.corporal;
+    const cfg = {
+      ...baseCfg,
+      hitBase: Math.min(0.94, baseCfg.hitBase + LODIBIDON_BOT_HIT_BONUS),
+    };
+    const center = this.map.lodibidonCenter;
+    const humans = { alpha: 0, omega: 0 };
+
+    if (this.mp) {
+      for (const p of this.mp.players.values()) {
+        if (p.team === 'alpha') humans.alpha++;
+        else if (p.team === 'omega') humans.omega++;
+      }
+    } else {
+      humans[this.lodibidon.playerTeam]++;
+    }
+
+    let botIdx = 0;
+    for (const team of /** @type {const} */ (['alpha', 'omega'])) {
+      const need = 2 - humans[team];
+      const labelRole = team === this.lodibidon.playerTeam ? 'ally' : 'enemy';
+      for (let i = 0; i < need; i++) {
+        const memberIndex = humans[team] + i;
+        const sp = this._lodibidonSpawnForMember(team, memberIndex);
+        const onSound = (key, pos, opts) => this._playWorldSound(key, pos, opts);
+        const onShoot = this._makeBotShootHandler(botIdx);
+        const bot = new Bot(
+          this.scene, sp, this.map, botIdx, cfg, onSound, 0, onShoot,
+          { bodyTeam: team, labelRole },
+        );
+        bot.team = team;
+        bot.noRespawn = true;
+        bot.mesh.rotation.y = yawToward(sp.x, sp.z, center.x, center.z);
+        bot.entity.spawnPos = { x: sp.x, z: sp.z };
+        bot.loco.spawnPos = { x: sp.x, z: sp.z };
+        bot.loco.nudgeFromSpawn();
+        this.bots.push(bot);
+        botIdx++;
+      }
+    }
+  }
+
+  /** Host sim bots or client network proxies — whichever this peer uses. */
+  _lodibidonBots() {
+    return this._isMpClient()
+      ? this.syncedBots.filter(Boolean)
+      : this.bots;
+  }
+
+  /** @param {number} index */
+  _getLodibidonBot(index) {
+    if (this._isMpClient()) return this.syncedBots[index] ?? null;
+    return this.bots[index] ?? null;
+  }
+
+  /** @param {'alpha'|'omega'} team */
+  _lodibidonTeamAliveCount(team) {
+    let n = 0;
+    if (team === this.lodibidon?.playerTeam && this.alive) n++;
+
+    for (const bot of this._lodibidonBots()) {
+      if (bot.alive && bot.team === team) n++;
+    }
+
+    if (this.mp) {
+      for (const [uid, p] of this.mp.players) {
+        if (uid === this.mp.uid) continue;
+        if (p.team === team && (p.alive ?? true)) n++;
+      }
+    }
+    return n;
+  }
+
+  _lodibidonResetRound(nowMs) {
+    this._lodibidonSpawnRotation = (this._lodibidonSpawnRotation ?? 0) + 1;
+    const center = this.map.lodibidonCenter;
+    this.alive = true;
+    this.health = MAX_HEALTH;
+    this.lodibidon.spectating = false;
+    this.lodibidon.spectateTarget = null;
+    this.weapon.equip(this.weapon.key);
+    this.grenades?.reset();
+    this.hud.setHealth(MAX_HEALTH);
+    this.hud.hideDeathScreen();
+    this.hud.hideLodibidonRoundEnd();
+    this.mp?.setSpectating(false);
+    this.mp?.updateHealth(MAX_HEALTH);
+
+    const sp = this._getLodibidonPlayerSpawn();
+    this._placePlayerAtWithYaw(sp.x, sp.z, center.x, center.z);
+
+    for (const bot of this.bots) {
+      bot.alive = true;
+      bot.health = bot.maxHealth;
+      bot.entity.health = bot.maxHealth;
+      bot.entity.alive = true;
+      bot.mesh.visible = true;
+      const team = bot.team;
+      const roster = this._lodibidonTeamRoster(team, true);
+      const memberIdx = roster.findIndex(m => m.kind === 'bot' && m.botIndex === bot.index);
+      const spawn = this._lodibidonSpawnForMember(team, Math.max(0, memberIdx));
+      bot.mesh.position.set(spawn.x, 0, spawn.z);
+      bot.mesh.rotation.y = yawToward(spawn.x, spawn.z, center.x, center.z);
+      bot.entity.spawnPos = { x: spawn.x, z: spawn.z };
+      bot.loco.spawnPos = { x: spawn.x, z: spawn.z };
+      bot.loco.nudgeFromSpawn();
+      bot.loco.stuckTime = 0;
+      bot.brain.reset();
+    }
+
+    this.hud.setLodibidonAlive(null);
+    this._lodibidonLastOneVoicePlayed = false;
+
+    this.lodibidon.startRound(nowMs);
+    this.mp?.syncMatch(this.lodibidon.buildMatchState(nowMs));
+    setTimeout(() => { if (this.running && this.alive) this.controls.lock(); }, 150);
+  }
+
+  _getBotCombatTarget(bot) {
+    if (!this._isLodibidon()) {
+      return {
+        x: this.camera.position.x,
+        z: this.camera.position.z,
+        isPlayer: true,
+      };
+    }
+
+    const phase = this.lodibidon.phase;
+    if (phase === 'prep' || phase === 'round_end' || phase === 'match_over') {
+      return null;
+    }
+
+    /** @type {{ x:number, z:number, bot?: import('./bots/host-bot.js').Bot, isPlayer?: boolean }[]} */
+    const enemies = [];
+
+    if (this.alive && bot.team !== this.lodibidon.playerTeam) {
+      enemies.push({
+        x: this.camera.position.x,
+        z: this.camera.position.z,
+        isPlayer: true,
+      });
+    }
+
+    for (const b of this.bots) {
+      if (b !== bot && b.alive && b.team !== bot.team) {
+        enemies.push({
+          x: b.mesh.position.x,
+          z: b.mesh.position.z,
+          bot: b,
+        });
+      }
+    }
+
+    for (const [uid, rp] of this.remotePlayers) {
+      if (!(rp.data.alive ?? true)) continue;
+      if (rp.data.team && rp.data.team !== bot.team) {
+        enemies.push({
+          x: rp.mesh.position.x,
+          z: rp.mesh.position.z,
+          isPlayer: true,
+          playerUid: uid,
+        });
+      }
+    }
+
+    if (!enemies.length) return null;
+
+    let best = enemies[0];
+    let bestD = Infinity;
+    const bx = bot.mesh.position.x;
+    const bz = bot.mesh.position.z;
+    for (const e of enemies) {
+      const d = (e.x - bx) ** 2 + (e.z - bz) ** 2;
+      if (d < bestD) { bestD = d; best = e; }
+    }
+    return best;
+  }
+
+  _lodibidonLabelOpts(entityTeam) {
+    if (!this._isLodibidon()) return {};
+    const isAlly = entityTeam === this.lodibidon.playerTeam;
+    return {
+      alwaysShow: isAlly,
+      skipLos:    isAlly,
+    };
+  }
+
+  _applyBotHit(attacker, damage, target) {
+    if (!target) return;
+    if (target.isPlayer) {
+      if (this._isLodibidon() && attacker.team === this.lodibidon.playerTeam) return;
+      const killerName = `Bot-${attacker.index + 1}`;
+      if (target.playerUid && this.mp) {
+        this.mp.sendHit(target.playerUid, damage, {
+          killerName,
+          botIndex: attacker.index,
+        });
+        return;
+      }
+      this.takeDamage(damage, killerName);
+      return;
+    }
+    if (target.bot && target.bot.alive) {
+      const killed = target.bot.takeDamage(damage);
+      if (killed) this._onBotEliminated(target.bot, false, attacker);
+    }
+  }
+
+  /** @param {'alpha'|'omega'} team */
+  _lodibidonKillerTeam(killerName) {
+    const bot = this._botFromKillName(killerName);
+    if (bot?.team) return bot.team;
+    if (this.mp) {
+      for (const [, p] of this.mp.players) {
+        if (p.name === killerName && (p.team === 'alpha' || p.team === 'omega')) return p.team;
+      }
+    }
+    return enemyTeam(this.lodibidon.playerTeam);
+  }
+
+  _lodibidonVictimTeam(victimName, victimUid = null) {
+    const bot = this._botFromKillName(victimName);
+    if (bot?.team) return bot.team;
+    if (victimUid && this.mp) {
+      const p = this.mp.players.get(victimUid);
+      if (p?.team === 'alpha' || p?.team === 'omega') return p.team;
+    }
+    for (const rp of this.remotePlayers.values()) {
+      if (rp.data.name === victimName && (rp.data.team === 'alpha' || rp.data.team === 'omega')) {
+        return rp.data.team;
+      }
+    }
+    return enemyTeam(this.lodibidon.playerTeam);
+  }
+
+  /**
+   * @param {'alpha'|'omega'|null} killerTeam
+   * @param {'alpha'|'omega'} victimTeam
+   */
+  _lodibidonOnElimination(killerTeam, victimTeam, opts = {}) {
+    if (!this._isLodibidon() || !victimTeam) return;
+    const pt = this.lodibidon.playerTeam;
+    if (!opts.skipTeamSting) {
+      if (killerTeam && killerTeam !== victimTeam) {
+        sound.playLodibidonTeamKill(killerTeam === pt);
+      } else if (!killerTeam) {
+        sound.playLodibidonTeamKill(victimTeam !== pt);
+      }
+    }
+    this._checkLodibidonLastOneStanding();
+  }
+
+  _checkLodibidonLastOneStanding() {
+    if (!this.lodibidon || this._lodibidonLastOneVoicePlayed) return;
+    if (this.lodibidon.phase === 'prep' || this.lodibidon.phase === 'round_end'
+        || this.lodibidon.phase === 'match_over') return;
+    const pt = this.lodibidon.playerTeam;
+    if (this._lodibidonTeamAliveCount(pt) === 1 && this.alive) {
+      this._lodibidonLastOneVoicePlayed = true;
+      sound.playLastOneStanding();
+    }
+  }
+
+  _playLodibidonRoundEndSound(round) {
+    if (this._lodibidonRoundEndSoundRound === round) return;
+    this._lodibidonRoundEndSoundRound = round;
+    this.hud?.cancelMedal();
+    sound.playLodibidonRoundEnd();
+  }
+
+  /** Skip kill confirm when round is over or this kill ends the round (elimination). */
+  _lodibidonShouldSkipKillConfirm(victimTeam = null) {
+    if (!this.lodibidon) return false;
+    const phase = this.lodibidon.phase;
+    if (phase === 'round_end' || phase === 'match_over') return true;
+    if (victimTeam && this._lodibidonTeamAliveCount(victimTeam) === 0) return true;
+    return false;
+  }
+
+  _isLodibidon() { return !!this.lodibidon; }
+
+  _isLodibidonMatchOver() {
+    return this.lodibidon?.phase === 'match_over' || this._lodibidonMatchOverActive;
+  }
+
+  /** Unlock pointer, hide pause panel — match-end scoreboard needs mouse. */
+  _enterLodibidonMatchOver() {
+    if (this._lodibidonMatchOverActive) return;
+    this._lodibidonMatchOverActive = true;
+    this.mouseDown = false;
+    this.keys.clear();
+    this.controls?.unlock();
+    document.getElementById('pointer-lock-overlay')?.classList.add('hidden');
+    this.hud?.hideLodibidonRoundEnd();
+    this.hud?.cancelMedal();
+    sound.stopVoiceAndMedals();
+    sound.playLodibidonMatchEnd();
+  }
+
+  /** World-space muzzle flash from a character standing at x/z facing rotY. */
+  _playWorldMuzzleFlash(x, z, rotY, y = 1.12) {
+    if (!this.particles) return;
+    this._muzzleDir.set(Math.sin(rotY), 0, Math.cos(rotY));
+    this._muzzlePos.set(x, y, z).addScaledVector(this._muzzleDir, 0.62);
+    this.particles.spawnMuzzleFlash(this._muzzlePos, this._muzzleDir);
+  }
+
+  _playCharacterMuzzleFlash(mesh) {
+    if (!mesh) return;
+    this._playWorldMuzzleFlash(mesh.position.x, mesh.position.z, mesh.rotation.y);
+  }
+
+  _makeBotShootHandler(botIdx) {
+    return () => {
+      const b = this.bots[botIdx];
+      if (!b?.alive) return;
+      this._playCharacterMuzzleFlash(b.mesh);
+      if (!this.mp) return;
+      this.mp.sendWorldEvent({
+        type:     'bot_shot',
+        botIndex: botIdx,
+        x:        b.mesh.position.x,
+        z:        b.mesh.position.z,
+        rotY:     b.mesh.rotation.y,
+      });
+    };
+  }
+
   _isMultiplayer() { return this.mode === 'multi' && !!this.mp; }
   _isMpHost()      { return this._isMultiplayer() && this.mp.isHost; }
   _isMpClient()    { return this._isMultiplayer() && !this.mp.isHost; }
@@ -445,16 +945,74 @@ export class Game {
     if (!name?.startsWith('Bot-')) return null;
     const idx = parseInt(name.replace('Bot-', ''), 10) - 1;
     if (Number.isNaN(idx) || idx < 0) return null;
-    return this.bots[idx] ?? null;
+    return this._getLodibidonBot(idx);
   }
 
-  _onBotEliminated(bot, isHeadshot = false) {
+  /**
+   * @param {import('./bots/host-bot.js').Bot} bot
+   * @param {boolean} [isHeadshot]
+   * @param {'player'|import('./bots/host-bot.js').Bot|null} [killer='player']
+   * @param {{ killerTeam?: string|null, excludeUid?: string|null }} [mpOpts]
+   */
+  _onBotEliminated(bot, isHeadshot = false, killer = 'player', mpOpts = {}) {
     if (!bot) return;
     bot.deaths++;
-    this._onKill(`Bot-${bot.index + 1}`, isHeadshot);
+    const victimName = `Bot-${bot.index + 1}`;
+
+    if (killer && typeof killer === 'object') {
+      killer.kills = (killer.kills ?? 0) + 1;
+      this.hud.addKillFeed(`Bot-${killer.index + 1}`, victimName);
+      if (this._isLodibidon() && killer.team && bot.team) {
+        this._lodibidonOnElimination(killer.team, bot.team);
+        this._broadcastLodElim(killer.team, bot.team);
+      }
+      return;
+    }
+
+    if (killer === 'player') {
+      this._onKill(victimName, isHeadshot);
+      if (this._isLodibidon() && bot.team) {
+        this._broadcastLodElim(this.lodibidon.playerTeam, bot.team, this.mp?.uid ?? null);
+      }
+      return;
+    }
+
+    if (this._isLodibidon() && bot.team) {
+      this._lodibidonOnElimination(null, bot.team);
+      this._broadcastLodElim(mpOpts.killerTeam ?? null, bot.team, mpOpts.excludeUid ?? null);
+    }
+  }
+
+  /** Tell MP clients about a bot elimination (host already played locally). */
+  _broadcastLodElim(killerTeam, victimTeam, excludeUid = null) {
+    if (!this._isMpHost() || !this._isLodibidon()) return;
+    this.mp.sendWorldEvent({
+      type:       'lod_elim',
+      killerTeam,
+      victimTeam,
+      excludeUid,
+    });
+  }
+
+  _sortLeaderboardRows(rows) {
+    return [...rows].sort((a, b) => {
+      const ra = a.kills / Math.max(1, a.deaths);
+      const rb = b.kills / Math.max(1, b.deaths);
+      return b.kills - a.kills || rb - ra;
+    });
   }
 
   _getLeaderboardRows() {
+    if (this._isLodibidon()) {
+      const stats = this.getLodibidonMatchStats();
+      return {
+        teamMode:   true,
+        playerTeam: stats.playerTeam,
+        alpha:      this._sortLeaderboardRows(stats.alpha),
+        omega:      this._sortLeaderboardRows(stats.omega),
+      };
+    }
+
     const rows = this.mp
       ? this.mp.getLeaderboardRows()
       : [{
@@ -483,13 +1041,13 @@ export class Game {
       });
     }
 
-    return rows.sort((a, b) => b.kills - a.kills || b.ratio - a.ratio);
+    return { teamMode: false, rows: this._sortLeaderboardRows(rows) };
   }
 
   _initBots(count) {
     if (this._isMpClient()) {
       for (let i = 0; i < count; i++) {
-        const sb = new SyncedBot(this.scene, this.map, i);
+        const sb = this._makeSyncedBot(i);
         sb.mesh.visible = false;
         this.syncedBots[i] = sb;
       }
@@ -502,17 +1060,7 @@ export class Game {
       const slot = this._claimLeastCrowdedSpawn(half, half + count);
       const sp        = this._getSpawnPos(slot);
       const onSound   = (key, pos, opts) => this._playWorldSound(key, pos, opts);
-      const onShoot   = () => {
-        if (!this.mp) return;
-        const b = this.bots[i];
-        if (!b?.alive) return;
-        this.mp.sendWorldEvent({
-          type:     'bot_shot',
-          botIndex: i,
-          x:        b.mesh.position.x,
-          z:        b.mesh.position.z,
-        });
-      };
+      const onShoot   = this._makeBotShootHandler(i);
       this.bots.push(new Bot(this.scene, sp, this.map, i, cfg, onSound, slot, onShoot));
     }
   }
@@ -522,9 +1070,23 @@ export class Game {
       const idx = Number(key);
       if (Number.isNaN(idx)) continue;
       if (!this.syncedBots[idx]) {
-        this.syncedBots[idx] = new SyncedBot(this.scene, this.map, idx);
+        this.syncedBots[idx] = this._makeSyncedBot(idx);
       }
       this.syncedBots[idx].applyState(state);
+    }
+    this._syncSyncedBotPlayerTeam();
+  }
+
+  _makeSyncedBot(index) {
+    return new SyncedBot(this.scene, this.map, index, {
+      playerTeam: this.lodibidon?.playerTeam ?? null,
+    });
+  }
+
+  _syncSyncedBotPlayerTeam() {
+    const team = this.lodibidon?.playerTeam ?? null;
+    for (const sb of this.syncedBots) {
+      sb?.setPlayerTeam(team);
     }
   }
 
@@ -565,7 +1127,10 @@ export class Game {
           const dmg = GRENADE_DAMAGE * t * t;
           if (dmg > 0) {
             const killed = bot.takeDamage(dmg);
-            if (killed) this._onBotEliminated(bot, false);
+            if (killed) {
+              const killer = sourceName === this.username ? 'player' : null;
+              this._onBotEliminated(bot, false, killer);
+            }
           }
         }
       }
@@ -597,10 +1162,12 @@ export class Game {
       case 'shot': {
         const snd = { assault_rifle: 'ar_shoot', shotgun: 'sg_shoot', sniper: 'sn_shoot' }[evt.weapon] ?? 'ar_shoot';
         this._playWorldSound(snd, { x: evt.x, y: evt.y ?? 1.2, z: evt.z }, { volume: 0.58, maxDist: 42 });
+        this._playWorldMuzzleFlash(evt.x, evt.z, evt.rotY ?? 0, evt.y ?? 1.2);
         break;
       }
       case 'bot_shot':
         this._playWorldSound('ar_shoot', { x: evt.x, y: 1.2, z: evt.z }, { volume: 0.65, maxDist: 38 });
+        this._playWorldMuzzleFlash(evt.x, evt.z, evt.rotY ?? 0);
         break;
       case 'bot_hit':
         if (this._isMpHost()) {
@@ -609,14 +1176,18 @@ export class Game {
             this._recordDamage(`bot:${evt.botIndex}`, evt.shooter);
             const killed = bot.takeDamage(evt.damage);
             if (killed) {
-              bot.deaths++;
-              this.mp.sendWorldEvent({
-                type:     'bot_kill',
-                botIndex: evt.botIndex,
-                shooter:  evt.shooter,
+              const killer = evt.shooter === this.mp.uid ? 'player' : null;
+              const shooterTeam = this.mp.players.get(evt.shooter)?.team ?? null;
+              this._onBotEliminated(bot, false, killer, {
+                killerTeam: killer ? undefined : shooterTeam,
+                excludeUid: evt.shooter,
               });
-              if (evt.shooter === this.mp.uid) {
-                this._onKill(`Bot-${bot.index + 1}`, false);
+              if (evt.shooter !== this.mp.uid) {
+                this.mp.sendWorldEvent({
+                  type:     'bot_kill',
+                  botIndex: evt.botIndex,
+                  shooter:  evt.shooter,
+                });
               }
             }
           }
@@ -625,6 +1196,11 @@ export class Game {
       case 'bot_kill':
         if (evt.shooter === this.mp.uid) {
           this._onKill(`Bot-${evt.botIndex + 1}`, false);
+        }
+        break;
+      case 'lod_elim':
+        if (this._isMpClient() && this._isLodibidon() && evt.excludeUid !== this.mp.uid) {
+          this._lodibidonOnElimination(evt.killerTeam ?? null, evt.victimTeam);
         }
         break;
       case 'grenade_throw':
@@ -650,9 +1226,13 @@ export class Game {
     if (this._isMpClient()) {
       return this.syncedBots
         .filter(b => b && b.alive)
+        .filter(b => !this._isLodibidon() || b.team !== this.lodibidon.playerTeam)
         .map(b => ({ mesh: b.mesh, ref: { type: 'synced', index: b.index } }));
     }
-    return this.bots.filter(b => b.alive).map(b => ({ mesh: b.mesh, ref: b }));
+    return this.bots
+      .filter(b => b.alive)
+      .filter(b => !this._isLodibidon() || b.team !== this.lodibidon.playerTeam)
+      .map(b => ({ mesh: b.mesh, ref: b }));
   }
 
   /** Play a sound in world space — routes through sound.playAt() with the camera as the listener. */
@@ -691,10 +1271,15 @@ export class Game {
             const isHead = this._recentlyShot.get(uid) ?? false;
             this._recentlyShot.delete(uid);
             this._onKill(data.name ?? 'Player', isHead, uid);
+          } else if (this._isLodibidon() && (data.team === 'alpha' || data.team === 'omega')) {
+            this._lodibidonOnElimination(null, data.team);
           }
         }
       } else {
-        const { mesh, rig, healthBar } = this._buildRemotePlayerMesh(data.name ?? 'Player');
+        const { mesh, rig, healthBar } = this._buildRemotePlayerMesh(
+          data.name ?? 'Player',
+          data.team,
+        );
         mesh.position.set(data.x ?? 0, data.y ?? 0, data.z ?? 0);
         this.scene.add(mesh);
         this.remotePlayers.set(uid, {
@@ -715,7 +1300,9 @@ export class Game {
     };
 
     this.mp.onHitReceived = evt => {
-      const killerName = this.mp.players.get(evt.shooter)?.name ?? 'Player';
+      let killerName = evt.killerName;
+      if (!killerName && evt.botIndex != null) killerName = `Bot-${evt.botIndex + 1}`;
+      if (!killerName) killerName = this.mp.players.get(evt.shooter)?.name ?? 'Player';
       this.takeDamage(evt.damage, killerName);
     };
 
@@ -724,6 +1311,16 @@ export class Game {
     };
 
     this.mp.onWorldEvent = evt => this._handleWorldEvent(evt);
+
+    if (this._isLodibidon()) {
+      this.mp.onMatchUpdate = data => {
+        const prevRound = this.lodibidon.roundNumber;
+        this.lodibidon.applyMatchState(data);
+        if (data.round > prevRound && data.phase === 'prep') {
+          this._lodibidonResetRound(performance.now());
+        }
+      };
+    }
   }
 
   // ═══════════════════════════════════════════════════════
@@ -743,16 +1340,47 @@ export class Game {
   }
 
   _update(delta, nowMs) {
+    if (this.lodibidon) {
+      if (this._isMpClient()) {
+        this.lodibidon._updateSpectate();
+      } else {
+        this.lodibidon.tick(delta, nowMs);
+        if (this._isMpHost() && nowMs - this._lastMatchSyncMs > 150) {
+          this._lastMatchSyncMs = nowMs;
+          this.mp.syncMatch(this.lodibidon.buildMatchState(nowMs));
+        }
+      }
+      if (this.lodibidon.phase === 'match_over') {
+        this._enterLodibidonMatchOver();
+        this.particles.update(delta);
+        this._updateRemotePlayers(delta);
+        return;
+      }
+    }
+
+    if (this.lodibidon?.spectating) {
+      this._updateBots(delta, nowMs);
+      this._syncBotsToFirebase(nowMs);
+      this._updateRemotePlayers(delta);
+      this.particles.update(delta);
+      this._updateMinimapAndHud(nowMs);
+      return;
+    }
+
     if (!this.alive) return;
 
-    // Auto fire
-    if (this.mouseDown && this.weapon.def.automatic && this.controls.isLocked) {
+    const canAct = !this.lodibidon || this.lodibidon.canAct(nowMs);
+
+    if (canAct && this.mouseDown && this.weapon.def.automatic && this.controls.isLocked) {
       this._tryShoot(nowMs);
     }
 
-    this._updateMovement(delta);
-    this._updatePhysics(delta);
-    this._updateRegen(delta, nowMs);
+    if (canAct) {
+      this._updateMovement(delta);
+      this._updatePhysics(delta);
+    }
+
+    if (!this.lodibidon) this._updateRegen(delta, nowMs);
     this._updateHitShake(delta);
 
     // Weapon system — receives isMoving for bob, mouseDown for recoil recovery gate
@@ -763,7 +1391,7 @@ export class Game {
     this._updateBots(delta, nowMs);
     this._syncBotsToFirebase(nowMs);
     this._updateRemotePlayers(delta);
-    this._updateAmmoChests();
+    if (!this._isLodibidon()) this._updateAmmoChests();
     if (this.grenades) {
       this.grenades.update(delta);
       this.hud.setGrenades(this.grenades.count);
@@ -804,7 +1432,10 @@ export class Game {
       if (this.damageFlashTimer <= 0) this.hud.hideDamageVignette();
     }
 
-    // Minimap — flatten Three.js objects to plain data
+    this._updateMinimapAndHud(nowMs);
+  }
+
+  _updateMinimapAndHud(nowMs) {
     this.camera.getWorldDirection(this._camDir);
     const dir = this._camDir;
     this.hud.updateMinimap(
@@ -812,6 +1443,7 @@ export class Game {
       nowMs,
       this._collectMinimapEnemies(),
     );
+    if (this.lodibidon) this._updateLodibidonAliveHud();
   }
 
   // ═══════════════════════════════════════════════════════
@@ -852,6 +1484,10 @@ export class Game {
 
   _updateMovement(delta) {
     if (!this.controls.isLocked) return;
+    if (this.lodibidon && !this.lodibidon.canMove()) {
+      this.isMoving = false;
+      return;
+    }
 
     const sprint = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
     const spd    = PLAYER_SPEED
@@ -895,6 +1531,7 @@ export class Game {
     if (!this.map.isWall(cx.x, cx.z + this._airVelZ * delta)) cx.z += this._airVelZ * delta;
 
     if (this.keys.has('Space') && this.onGround) {
+      if (this.lodibidon && !this.lodibidon.canJump()) return;
       this.velY = JUMP_FORCE;
       this.onGround = false;
       sound.play('jump', { volume: 0.18 });
@@ -922,6 +1559,7 @@ export class Game {
 
   _tryShoot(nowMs) {
     if (!this.alive || !this.controls.isLocked || this.weapon.reloading) return;
+    if (this.lodibidon && !this.lodibidon.canShoot()) return;
     if (this.grenades?.isPrimed) return;
 
     if (this.weapon.ammo <= 0) {
@@ -940,6 +1578,7 @@ export class Game {
         x: pos.x,
         y: pos.y,
         z: pos.z,
+        rotY: this.camera.rotation.y,
         weapon: this.weapon.key,
       });
     }
@@ -1024,6 +1663,7 @@ export class Game {
     if (this.mode === 'multi' && this.remotePlayers.size > 0) {
       const rpEntries = [...this.remotePlayers.values()]
         .filter(rp => rp.mesh.visible)
+        .filter(rp => !this._isLodibidon() || rp.data.team !== this.lodibidon.playerTeam)
         .map(rp => ({ mesh: rp.mesh, ref: rp }));
       const rHits = this.raycaster.intersectObjects(rpEntries.map(e => e.mesh), true);
       for (const hit of rHits) {
@@ -1085,7 +1725,15 @@ export class Game {
     this.kills++;
     this.hud.showKillScore(isHeadshot);
     this.hud.showMedal(this._killStreak);
-    sound.play('kill_confirm', { volume: 1.0, pitch: this._killConfirmPitch() });
+    if (this._isLodibidon()) {
+      const vt = this._lodibidonVictimTeam(victimName, victimUid);
+      if (!this._lodibidonShouldSkipKillConfirm(vt)) {
+        sound.playLodibidonKillConfirm();
+      }
+      this._lodibidonOnElimination(this.lodibidon.playerTeam, vt, { skipTeamSting: true });
+    } else {
+      sound.playClassicKillConfirm(this._killStreak);
+    }
     sound.playKillVoice(0.38, 300);
     this.hud.setScore(this.kills, this.deaths);
     this.hud.addKillFeed(this.username, victimName);
@@ -1102,12 +1750,16 @@ export class Game {
     }
   }
 
-  /** kill-confirm pitch: +0.08 per kill in streak, capped at 5. */
-  _killConfirmPitch() {
-    return 1.0 + Math.min(4, Math.max(0, this._killStreak - 1)) * 0.08;
-  }
-
   _die(killerName) {
+    if (this._isLodibidon()) {
+      this._lodibidonOnElimination(
+        this._lodibidonKillerTeam(killerName),
+        this.lodibidon.playerTeam,
+      );
+      this.lodibidon.onLocalDeath(killerName);
+      return;
+    }
+
     this.alive       = false;
     this.deaths++;
     this._killStreak = 0;
@@ -1170,15 +1822,29 @@ export class Game {
   // ═══════════════════════════════════════════════════════
 
   _updateBots(delta, nowMs) {
+    const botCanAct = !this.lodibidon || this.lodibidon.canAct(nowMs);
+
     if (this._isMpClient()) {
       this.syncedBots.forEach(sb => {
-        if (sb) sb.updateVisual(delta, this.camera, (key, pos, opts) => this._playWorldSound(key, pos, opts));
+        if (sb) {
+          sb.updateVisual(delta, this.camera, (key, pos, opts) => this._playWorldSound(key, pos, opts));
+          if (sb.alive) {
+            updateCharacterOverheadUI(sb.mesh, this.camera, this.map, {
+              healthBar: sb.healthBar,
+              healthRatio: sb.health / sb.maxHealth,
+              visible: true,
+              ...this._lodibidonLabelOpts(sb.team),
+            });
+          }
+        }
       });
       return;
     }
+
     this.bots.forEach(bot => {
-      bot.update(delta, nowMs, this.camera.position, (dmg, name) => this.takeDamage(dmg, name));
-      bot.updateHealthBar(this.camera, this.map);
+      const target = this._getBotCombatTarget(bot);
+      bot.update(delta, nowMs, target, (dmg, tgt) => this._applyBotHit(bot, dmg, tgt), botCanAct);
+      bot.updateHealthBar(this.camera, this.map, this._lodibidonLabelOpts(bot.team));
     });
   }
 
@@ -1198,6 +1864,7 @@ export class Game {
         healthBar: rp.healthBar,
         healthRatio: Math.max(0, hp / maxHp),
         visible: (rp.data.alive ?? true) && hp > 0,
+        ...this._lodibidonLabelOpts(rp.data.team),
       });
     });
   }
@@ -1369,9 +2036,13 @@ export class Game {
   //  MESH BUILDERS
   // ═══════════════════════════════════════════════════════
 
-  _buildRemotePlayerMesh(playerName = 'Player') {
+  _buildRemotePlayerMesh(playerName = 'Player', mpTeam = null) {
+    const isLod = this._isLodibidon();
+    const isAlly = isLod && mpTeam === this.lodibidon?.playerTeam;
+    const bodyTeam = mpTeam === 'alpha' || mpTeam === 'omega' ? mpTeam : 'ally';
     const { mesh, rig, healthBar } = buildCharacterMesh({
-      team: 'ally',
+      team: bodyTeam,
+      labelRole: isLod ? (isAlly ? 'ally' : 'enemy') : 'ally',
       name: playerName,
       showHealthBar: true,
     });

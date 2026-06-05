@@ -32,8 +32,16 @@ export class MultiplayerManager {
     this.onLobbyUpdate   = null;
     /** @type {() => void} */
     this.onRoomClosed    = null;
+    /** @type {(data:object) => void} */
+    this.onMatchUpdate   = null;
 
+    this.gameMode = 'ffa';
     this._roomClosedFired = false;
+  }
+
+  /** @param {'ffa'|'lodibidon'} mode */
+  setGameMode(mode) {
+    this.gameMode = mode;
   }
 
   // ─── INIT ────────────────────────────────────────────
@@ -49,20 +57,26 @@ export class MultiplayerManager {
   }
 
   // ─── ROOM CREATION ───────────────────────────────────
-  async hostRoom(username, weapon) {
+  async hostRoom(username, weapon, opts = {}) {
     const code = this._genCode();
     this.roomCode = code;
     this.isHost   = true;
+    this.gameMode = opts.gameMode ?? 'ffa';
 
     const roomData = {
-      host:    this.uid,
-      status:  'waiting',
-      created: Date.now(),
+      host:     this.uid,
+      status:   'waiting',
+      gameMode: this.gameMode,
+      created:  Date.now(),
       players: {
-        [this.uid]: this._playerPayload(username, weapon, true),
+        [this.uid]: this._playerPayload(username, weapon, true, opts.team ?? null),
       },
       world: { bots: {} },
     };
+
+    if (this.gameMode === 'lodibidon') {
+      roomData.match = this._defaultMatchState();
+    }
 
     await this.db.ref(`warfront_rooms/${code}`).set(roomData);
     this.roomRef = this.db.ref(`warfront_rooms/${code}`);
@@ -71,7 +85,7 @@ export class MultiplayerManager {
     return code;
   }
 
-  async joinRoom(code, username, weapon) {
+  async joinRoom(code, username, weapon, opts = {}) {
     const snap = await this.db.ref(`warfront_rooms/${code}`).once('value');
     if (!snap.exists()) throw new Error('Room not found. Check the code.');
 
@@ -83,9 +97,20 @@ export class MultiplayerManager {
 
     this.roomCode = code;
     this.isHost   = false;
+    this.gameMode = data.gameMode ?? 'ffa';
+
+    if (this.gameMode === 'lodibidon') {
+      const team = opts.team ?? null;
+      if (!team) throw new Error('Pick ALPHA or OMEGA before joining a Lodibidon room.');
+      const teamCount = Object.values(data.players || {})
+        .filter(p => p.team === team).length;
+      if (teamCount >= 2) throw new Error(`Team ${team.toUpperCase()} is full.`);
+    } else if (opts.team) {
+      // ignore team for FFA
+    }
 
     await this.db.ref(`warfront_rooms/${code}/players/${this.uid}`)
-      .set(this._playerPayload(username, weapon, false));
+      .set(this._playerPayload(username, weapon, false, opts.team ?? null));
 
     this.roomRef = this.db.ref(`warfront_rooms/${code}`);
     this._listen();
@@ -96,7 +121,35 @@ export class MultiplayerManager {
     if (this.isHost && this.roomRef) {
       this.roomRef.child('status').set('playing');
       this.roomRef.child('world/bots').set({});
+      if (this.gameMode === 'lodibidon') {
+        this.roomRef.child('match').set(this._defaultMatchState());
+      }
     }
+  }
+
+  /** @param {'alpha'|'omega'} team @returns {boolean} */
+  setTeam(team) {
+    if (!this.roomRef) return false;
+    if (this.gameMode === 'lodibidon') {
+      let count = 0;
+      for (const [uid, p] of this.players) {
+        if (uid !== this.uid && p.team === team) count++;
+      }
+      if (count >= 2) return false;
+    }
+    this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`).update({ team });
+    return true;
+  }
+
+  setSpectating(on) {
+    if (!this.roomRef) return;
+    this.db.ref(`warfront_rooms/${this.roomCode}/players/${this.uid}`).update({ spectating: !!on });
+  }
+
+  /** Host: push lodibidon match state. */
+  syncMatch(state) {
+    if (!this.roomRef || !this.isHost) return;
+    this.roomRef.child('match').set(state);
   }
 
   // ─── REAL-TIME DATA PUSH ─────────────────────────────
@@ -130,15 +183,18 @@ export class MultiplayerManager {
     this.roomRef.child('world/bots').set(botsByIndex);
   }
 
-  sendHit(targetUid, damage) {
+  sendHit(targetUid, damage, opts = {}) {
     if (!this.roomRef) return;
-    this.roomRef.child('events').push({
+    const payload = {
       type:    'hit',
       target:  targetUid,
-      shooter: this.uid,
+      shooter: opts.shooter ?? this.uid,
       damage,
       ts:      Date.now(),
-    });
+    };
+    if (opts.killerName != null) payload.killerName = opts.killerName;
+    if (opts.botIndex != null) payload.botIndex = opts.botIndex;
+    this.roomRef.child('events').push(payload);
   }
 
   /** Client → host: damage vs synced bot. */
@@ -175,7 +231,12 @@ export class MultiplayerManager {
       name:   data.name   || uid,
       weapon: data.weapon || 'assault_rifle',
       isHost: data.isHost || false,
+      team:   data.team   || null,
     }));
+  }
+
+  countTeam(team) {
+    return [...this.players.values()].filter(p => p.team === team).length;
   }
 
   // ─── CLEANUP ─────────────────────────────────────────
@@ -223,11 +284,13 @@ export class MultiplayerManager {
     return Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   }
 
-  _playerPayload(username, weapon, isHost) {
+  _playerPayload(username, weapon, isHost, team = null) {
     return {
       name:   username,
       weapon,
       isHost,
+      team,
+      spectating: false,
       x: 0, y: 0, z: 0, rotY: 0,
       health:  100,
       kills:   0,
@@ -235,6 +298,23 @@ export class MultiplayerManager {
       assists: 0,
       alive:   true,
       ts:      0,
+    };
+  }
+
+  _defaultMatchState() {
+    const now = Date.now();
+    return {
+      round:           1,
+      scores:          { alpha: 0, omega: 0 },
+      phase:           'prep',
+      phaseEndsAt:     now + 3000,
+      flagActive:      false,
+      captureProgress: 0,
+      captureTeam:     null,
+      roundWinner:     null,
+      matchWinner:     null,
+      winReason:       '',
+      ts:              now,
     };
   }
 
@@ -310,6 +390,16 @@ export class MultiplayerManager {
 
     this.roomRef.child('world/bots').on('value', snap => {
       this.onBotsUpdate?.(snap.val() || {});
+    });
+
+    this.roomRef.child('match').on('value', snap => {
+      const val = snap.val();
+      if (val) this.onMatchUpdate?.(val);
+    });
+
+    this.roomRef.child('match').once('value', snap => {
+      const val = snap.val();
+      if (val) this.onMatchUpdate?.(val);
     });
 
     this.roomRef.child('events').on('child_added', snap => {

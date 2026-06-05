@@ -738,6 +738,36 @@ html, body {
   color: rgba(255, 255, 255, 0.35);
 }
 
+.lb-teams-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: center;
+}
+.lb-team-block {
+  flex: 1 1 200px;
+  min-width: 200px;
+  max-width: 280px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 10px 12px 8px;
+}
+.lb-team-block.lb-player-team {
+  border-color: rgba(85, 170, 255, 0.35);
+}
+.lb-team-hdr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 4px;
+  margin: 0 0 8px;
+  color: rgba(255, 255, 255, 0.75);
+  text-align: left;
+}
+.lb-panel:has(.lb-teams-grid) {
+  min-width: 480px;
+  max-width: 620px;
+}
+
 #minimap {
   position: absolute; top: 20px; left: 20px;
   width: 150px; height: 150px;
@@ -927,3 +957,138 @@ html, body {
 }
 .loading-bar { width: 240px; height: 3px; background: rgba(255,255,255,0.1); }
 #loading-fill { height: 100%; background: var(--green); width: 0; transition: width 0.3s; }
+
+/* ─── LODIBIDON ──────────────────────────────────────────── */
+.team-btns { display: flex; gap: 10px; }
+.team-btn {
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px;
+  padding: 8px 18px; border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(0,0,0,0.35); color: rgba(255,255,255,0.65); cursor: pointer;
+}
+.team-btn.active { border-color: var(--green); color: var(--green); }
+.team-btn[data-team="alpha"].active { border-color: #6a9fd4; color: #8ab8e8; }
+.team-btn[data-team="omega"].active { border-color: #d46a6a; color: #e88a8a; }
+.lodibidon-launch-row { display: flex; gap: 12px; justify-content: center; margin: 12px 0; }
+.lobby-team-pick { margin: 16px 0; text-align: center; }
+
+#hud-lodibidon {
+  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 45; text-align: center; pointer-events: none;
+}
+#lodibidon-scoreline {
+  display: flex; align-items: center; gap: 16px;
+  font-family: var(--font-mono); font-size: 13px; letter-spacing: 2px;
+  background: rgba(0,0,0,0.55); padding: 6px 14px; border: 1px solid rgba(255,255,255,0.12);
+}
+.lod-alpha strong { color: #8ab8e8; }
+.lod-omega strong { color: #e88a8a; }
+.lod-round { color: rgba(255,255,255,0.45); font-size: 11px; }
+
+#lodibidon-timer {
+  margin-top: 6px; font-family: var(--font-mono); font-size: 22px;
+  letter-spacing: 3px; color: var(--green);
+}
+#lodibidon-flag-hint {
+  margin-top: 4px; font-size: 10px; letter-spacing: 2px; color: #ffcc44;
+}
+#lodibidon-alive {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  color: rgba(255,255,255,0.92);
+  text-shadow: 0 2px 12px rgba(0,0,0,0.65);
+}
+#lodibidon-capture {
+  margin-top: 6px; width: 160px; margin-left: auto; margin-right: auto;
+}
+#lod-capture-label { font-size: 9px; letter-spacing: 2px; color: rgba(255,255,255,0.6); }
+#lod-capture-track {
+  height: 4px; background: rgba(255,255,255,0.15); margin-top: 3px;
+}
+#lod-capture-fill { height: 100%; width: 0; background: #ffcc44; transition: width 0.1s linear; }
+
+#lodibidon-prep {
+  position: fixed; inset: 0; z-index: 62; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.35);
+}
+.lod-prep-num {
+  font-size: 96px; font-weight: 700; letter-spacing: 8px; color: var(--green);
+  text-shadow: 0 0 40px rgba(0,255,136,0.4);
+}
+.lod-prep-sub { font-size: 12px; letter-spacing: 3px; color: rgba(255,255,255,0.5); margin-top: 8px; }
+
+#lodibidon-round-end, #lodibidon-match-over {
+  position: fixed; inset: 0; z-index: 200;
+  pointer-events: auto;
+  background: rgba(0,0,0,0.72);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 10px;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+#lodibidon-round-end h2, #lod-match-over-banner {
+  font-size: 42px; letter-spacing: 8px; margin: 0;
+}
+.lod-round-won, .lod-banner-won { color: var(--green); }
+.lod-round-lost, .lod-banner-lost { color: #ff5555; }
+#lod-round-end-reason { font-size: 14px; letter-spacing: 3px; color: rgba(255,255,255,0.55); margin: 0; }
+.lod-match-score { font-family: var(--font-mono); font-size: 22px; letter-spacing: 4px; margin: 0 0 8px; }
+
+.lod-match-teams-grid {
+  display: flex; flex-wrap: wrap; gap: 20px; justify-content: center;
+  max-width: 720px; width: 100%; margin: 12px 0 20px;
+}
+.lod-match-team-block {
+  flex: 1 1 280px; max-width: 340px;
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.12);
+  padding: 12px 14px 10px;
+  text-align: left;
+}
+.lod-match-team-block.lod-player-team {
+  border-color: rgba(85,170,255,0.35);
+  box-shadow: 0 0 20px rgba(85,170,255,0.08);
+}
+.lod-match-team-block h3 {
+  font-size: 14px; letter-spacing: 4px; margin: 0 0 10px;
+  font-family: var(--font-mono);
+}
+.lod-team-result { font-size: 12px; letter-spacing: 3px; margin-left: 6px; }
+.lod-result-won { color: var(--green); }
+.lod-result-lost { color: #ff5555; }
+.lod-match-table {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--font-mono); font-size: 12px;
+}
+.lod-match-table th {
+  text-align: left; font-size: 10px; letter-spacing: 2px;
+  color: rgba(255,255,255,0.45); padding: 4px 6px 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.lod-match-table td { padding: 5px 6px 5px 0; }
+.lod-match-table tr.lb-row-self td { color: var(--green); }
+#btn-lodibidon-exit:disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
+
+#lodibidon-spectate {
+  position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+  z-index: 45; text-align: center; pointer-events: none;
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px;
+  background: rgba(0,0,0,0.55); padding: 8px 16px; border: 1px solid rgba(255,255,255,0.12);
+}
+#lodibidon-spectate strong { color: var(--green); }
+
+.lobby-player-team {
+  font-size: 10px; letter-spacing: 2px; margin-left: 8px;
+  padding: 2px 6px; border: 1px solid rgba(255,255,255,0.2);
+}
+.lobby-player-team.alpha { color: #8ab8e8; }
+.lobby-player-team.omega { color: #e88a8a; }
+
+.gametype-hint { text-align: center; font-size: 13px; letter-spacing: 2px; color: rgba(255,255,255,0.55); margin: 8px 0 20px; }
+.gametype-sub { text-align: center; font-size: 11px; letter-spacing: 1px; color: rgba(255,255,255,0.38); margin-top: 18px; max-width: 420px; margin-left: auto; margin-right: auto; }
+.gametype-nav { max-width: 360px; margin: 0 auto; }

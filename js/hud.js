@@ -18,6 +18,8 @@ import { sound }      from './sound.js';
 
 const MEDAL_MAP = { 3: 'medal_3', 5: 'medal_5', 10: 'medal_10' };
 const MEDAL_VISIBLE_MS = 3200;
+/** Delay before medal image + sting (was 500ms, +1s). */
+const MEDAL_SOUND_DELAY_MS = 1500;
 
 /** @param {string} id @returns {HTMLElement} */
 const $ = id => document.getElementById(id);
@@ -27,6 +29,8 @@ export class HUD {
     this._username   = username;
     this._medalTimer = null;
     this._hmTimeout  = null;
+    /** @type {ReturnType<typeof setInterval>|null} */
+    this._lodQuitTimer = null;
     /** @type {Map<string, { wx:number, wz:number, color:string, t:number }>} */
     this._radarHits  = new Map();
     /** @type {HTMLCanvasElement|null} */
@@ -152,6 +156,7 @@ export class HUD {
     if (!key) return;
     clearTimeout(this._medalTimer);
     this._medalTimer = setTimeout(() => {
+      this._medalTimer = null;
       const img = $('medal-display');
       if (!img) return;
       img.src = `images/medals/${key}.png`;
@@ -159,9 +164,16 @@ export class HUD {
       img.style.animation = 'none';
       void img.offsetHeight;
       img.style.animation = '';
-      sound.play(key, { volume: 1.0 });
+      sound.playMedalSound(key);
       setTimeout(() => img.classList.add('hidden'), MEDAL_VISIBLE_MS);
-    }, 500);
+    }, MEDAL_SOUND_DELAY_MS);
+  }
+
+  /** Cancel pending medal popup and hide overlay (round end). */
+  cancelMedal() {
+    clearTimeout(this._medalTimer);
+    this._medalTimer = null;
+    $('medal-display')?.classList.add('hidden');
   }
 
   showReloadBar(durationMs) {
@@ -382,23 +394,232 @@ export class HUD {
     ctx.restore();
   }
 
-  showLeaderboard(rows) {
+  showLeaderboard(data) {
     const panel = $('hud-leaderboard');
-    const body  = $('hud-leaderboard-body');
-    if (!panel || !body) return;
+    const mount = $('hud-leaderboard-mount');
+    if (!panel || !mount) return;
+
+    if (data?.teamMode) {
+      mount.innerHTML = this._renderTeamLeaderboard(data);
+    } else {
+      const rows = data?.rows ?? (Array.isArray(data) ? data : []);
+      mount.innerHTML = this._renderFlatLeaderboard(rows);
+    }
     panel.classList.remove('hidden');
-    body.innerHTML = rows.map(r => `
+  }
+
+  _leaderboardRowHtml(r) {
+    const ratio = r.ratio ?? (r.kills / Math.max(1, r.deaths));
+    return `
       <tr class="${r.isSelf ? 'lb-row-self' : ''}${r.isBot ? ' lb-row-bot' : ''}">
         <td>${r.name}</td>
         <td>${r.kills}</td>
-        <td>${r.assists}</td>
+        <td>${r.assists ?? 0}</td>
         <td>${r.deaths}</td>
-        <td>${r.ratio.toFixed(2)}</td>
-      </tr>
-    `).join('');
+        <td>${ratio.toFixed(2)}</td>
+      </tr>`;
+  }
+
+  _renderFlatLeaderboard(rows) {
+    const body = rows.map(r => this._leaderboardRowHtml(r)).join('');
+    return `
+      <div class="lb-title">MATCH LEADERBOARD</div>
+      <table class="lb-table">
+        <thead>
+          <tr>
+            <th>Player</th><th>K</th><th>A</th><th>D</th><th>K/D</th>
+          </tr>
+        </thead>
+        <tbody>${body || '<tr><td colspan="5">—</td></tr>'}</tbody>
+      </table>`;
+  }
+
+  _renderTeamBlock(team, rows, isPlayerTeam) {
+    const body = rows.map(r => this._leaderboardRowHtml(r)).join('');
+    return `
+      <div class="lb-team-block${isPlayerTeam ? ' lb-player-team' : ''}">
+        <h3 class="lb-team-hdr">${team.toUpperCase()}</h3>
+        <table class="lb-table">
+          <thead>
+            <tr>
+              <th>Player</th><th>K</th><th>A</th><th>D</th><th>K/D</th>
+            </tr>
+          </thead>
+          <tbody>${body || '<tr><td colspan="5">—</td></tr>'}</tbody>
+        </table>
+      </div>`;
+  }
+
+  _renderTeamLeaderboard(data) {
+    return `
+      <div class="lb-title">MATCH LEADERBOARD</div>
+      <div class="lb-teams-grid">
+        ${this._renderTeamBlock('alpha', data.alpha ?? [], data.playerTeam === 'alpha')}
+        ${this._renderTeamBlock('omega', data.omega ?? [], data.playerTeam === 'omega')}
+      </div>`;
   }
 
   hideLeaderboard() {
     $('hud-leaderboard')?.classList.add('hidden');
+  }
+
+  // ─── Lodibidon ───────────────────────────────────────────
+  showLodibidonMode(on = true) {
+    $('hud-lodibidon')?.classList.toggle('hidden', !on);
+  }
+
+  setLodibidonScore(scores, round) {
+    $('lod-score-alpha').textContent = scores.alpha ?? 0;
+    $('lod-score-omega').textContent = scores.omega ?? 0;
+    $('lod-round-num').textContent   = round ?? 1;
+  }
+
+  setLodibidonPrep(sec) {
+    const el = $('lodibidon-prep');
+    if (!el) return;
+    el.classList.remove('hidden');
+    $('lod-prep-num').textContent = sec;
+  }
+
+  hideLodibidonPrep() {
+    $('lodibidon-prep')?.classList.add('hidden');
+  }
+
+  /** @param {number|null} sec */
+  setLodibidonTimer(sec) {
+    const el = $('lodibidon-timer');
+    if (!el) return;
+    if (sec == null) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    el.textContent = `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  setLodibidonFlagActive(on) {
+    $('lodibidon-flag-hint')?.classList.toggle('hidden', !on);
+  }
+
+  setLodibidonCapture(team, progress) {
+    const wrap = $('lodibidon-capture');
+    if (!wrap) return;
+    if (!team || progress <= 0) {
+      wrap.classList.add('hidden');
+      return;
+    }
+    wrap.classList.remove('hidden');
+    $('lod-capture-label').textContent = `${team.toUpperCase()} CAPTURING`;
+    $('lod-capture-fill').style.width = `${Math.min(100, progress * 100)}%`;
+  }
+
+  showLodibidonSpectate(killer) {
+    $('death-screen')?.classList.add('hidden');
+    $('lod-spectate-killer').textContent = killer;
+    $('lodibidon-spectate')?.classList.remove('hidden');
+  }
+
+  setLodibidonSpectateName(name) {
+    $('lod-spectate-name').textContent = name;
+  }
+
+  showLodibidonRoundEnd(winner, reason, scores, round = 1, playerTeam = 'alpha') {
+    const title = $('lod-round-end-title');
+    const sub   = $('lod-round-end-reason');
+    const won   = winner === playerTeam;
+    if (title) {
+      title.textContent = won ? 'ROUND WON' : 'ROUND LOST';
+      title.classList.toggle('lod-round-won', won);
+      title.classList.toggle('lod-round-lost', !won);
+    }
+    if (sub) {
+      const reasonText = reason === 'capture' ? 'Flag captured' : 'Elimination';
+      sub.textContent = `${winner.toUpperCase()} wins — ${reasonText}`;
+    }
+    $('lodibidon-round-end')?.classList.remove('hidden');
+    if (scores) this.setLodibidonScore(scores, round);
+  }
+
+  /** @param {number|null} allyAlive — hide when null or full 2v2 */
+  setLodibidonAlive(allyAlive, enemyAlive = null) {
+    const el = $('lodibidon-alive');
+    if (!el) return;
+    if (allyAlive == null || enemyAlive == null) {
+      el.classList.add('hidden');
+      return;
+    }
+    el.textContent = `${allyAlive}V${enemyAlive}`;
+    el.classList.remove('hidden');
+  }
+
+  hideLodibidonRoundEnd() {
+    $('lodibidon-round-end')?.classList.add('hidden');
+    $('lodibidon-spectate')?.classList.add('hidden');
+  }
+
+  _fillLodibidonTeamTable(team, rows, resultLabel, isPlayerTeam) {
+    const hdr  = $(`lod-match-hdr-${team}`);
+    const body = $(`lod-match-body-${team}`);
+    const block = $(`lod-match-block-${team}`);
+    if (hdr) {
+      hdr.innerHTML = `${team.toUpperCase()} <span class="lod-team-result ${resultLabel === 'WON' ? 'lod-result-won' : 'lod-result-lost'}">${resultLabel}</span>`;
+    }
+    if (block) {
+      block.classList.toggle('lod-player-team', isPlayerTeam);
+    }
+    if (!body) return;
+    body.innerHTML = rows.map(r => {
+      const ratio = (r.kills / Math.max(1, r.deaths)).toFixed(2);
+      return `
+      <tr class="${r.isSelf ? 'lb-row-self' : ''}${r.isBot ? ' lb-row-bot' : ''}">
+        <td>${r.name}</td>
+        <td>${r.kills}</td>
+        <td>${r.deaths}</td>
+        <td>${r.assists ?? 0}</td>
+        <td>${ratio}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5">—</td></tr>';
+  }
+
+  _startLodibidonQuitCooldown() {
+    const btn = $('btn-lodibidon-exit');
+    if (!btn) return;
+    if (this._lodQuitTimer) clearInterval(this._lodQuitTimer);
+    btn.disabled = true;
+    let left = 5;
+    btn.textContent = `QUIT (${left})`;
+    this._lodQuitTimer = setInterval(() => {
+      left -= 1;
+      if (left > 0) {
+        btn.textContent = `QUIT (${left})`;
+      } else {
+        btn.textContent = 'QUIT';
+        btn.disabled = false;
+        clearInterval(this._lodQuitTimer);
+        this._lodQuitTimer = null;
+      }
+    }, 1000);
+  }
+
+  showLodibidonMatchOver(winner, scores, stats, playerTeam) {
+    this.hideLodibidonRoundEnd();
+
+    const banner = $('lod-match-over-banner');
+    const won = winner === playerTeam;
+    if (banner) {
+      banner.textContent = won ? 'VICTORY' : 'DEFEAT';
+      banner.classList.toggle('lod-banner-won', won);
+      banner.classList.toggle('lod-banner-lost', !won);
+    }
+    $('lod-match-final-score').textContent = `Rounds — ${scores.alpha ?? 0} : ${scores.omega ?? 0}`;
+
+    this._fillLodibidonTeamTable(
+      'alpha', stats?.alpha ?? [], winner === 'alpha' ? 'WON' : 'LOST', playerTeam === 'alpha',
+    );
+    this._fillLodibidonTeamTable(
+      'omega', stats?.omega ?? [], winner === 'omega' ? 'WON' : 'LOST', playerTeam === 'omega',
+    );
+
+    this._startLodibidonQuitCooldown();
+    $('lodibidon-match-over')?.classList.remove('hidden');
   }
 }

@@ -2,7 +2,14 @@
 //  WARFRONT — Host-authoritative bot (AI + body)
 // ═══════════════════════════════════════════════════════════
 
-import { BOT_SPEED } from '../config.js';
+import {
+  BOT_SPEED,
+  BOT_IDEAL_SHOOT_RANGE,
+  BOT_MIN_COMBAT_RANGE,
+  BOT_CHASE_SPEED_MULT,
+  BOT_ADVANCE_SPEED_MULT,
+  BOT_MISS_CLOSE_MULT,
+} from '../config.js';
 import { BotBrain } from './brain.js';
 import { BotLocomotion } from './locomotion.js';
 import { BotSoldierEntity } from './soldier-entity.js';
@@ -23,15 +30,16 @@ export class Bot {
    * @param {function(string,THREE.Vector3,object):void} [onSound]
    * @param {number} [spawnSlot]
    * @param {function():void} [onShoot]
+   * @param {{ bodyTeam?: string, labelRole?: 'ally'|'enemy' }} [visual]
    */
-  constructor(scene, spawnPos, map, index = 0, skill = DEFAULT_SKILL, onSound = null, spawnSlot = 0, onShoot = null) {
+  constructor(scene, spawnPos, map, index = 0, skill = DEFAULT_SKILL, onSound = null, spawnSlot = 0, onShoot = null, visual = {}) {
     this.index     = index;
     this.spawnSlot = spawnSlot;
     this.map       = map;
     this._onSound  = onSound;
     this._onShoot  = onShoot;
 
-    this.entity = new BotSoldierEntity(scene, index, spawnPos);
+    this.entity = new BotSoldierEntity(scene, index, spawnPos, visual);
     this.mesh   = this.entity.mesh;
     this.rig    = this.entity.rig;
     this.health = this.entity.health;
@@ -47,6 +55,7 @@ export class Bot {
     this.kills   = 0;
     this.deaths  = 0;
     this.assists = 0;
+    this.noRespawn = false;
 
     this._stepTimer   = index * 0.15;
     this._lastStepIdx = -1;
@@ -56,13 +65,20 @@ export class Bot {
   get state() { return this.entity.phase; }
   set state(v) { this.entity.phase = v; }
 
-  update(delta, nowMs, playerPos, onHitPlayer) {
-    if (!this.alive) return;
+  update(delta, nowMs, target, onHit, canAct = true) {
+    if (!this.alive || !canAct) {
+      if (this.alive && !canAct) this.entity.phase = 'idle';
+      return;
+    }
+    if (!target) {
+      this.entity.phase = 'idle';
+      return;
+    }
 
     const bx     = this.loco.x;
     const bz     = this.loco.z;
-    const hasLOS = this.map.hasLOS(bx, bz, playerPos.x, playerPos.z);
-    const ctx    = this.brain.tick(bx, bz, playerPos.x, playerPos.z, hasLOS, delta);
+    const hasLOS = this.map.hasLOS(bx, bz, target.x, target.z);
+    const ctx    = this.brain.tick(bx, bz, target.x, target.z, hasLOS, delta);
 
     this.entity.phase = this.brain.phase;
     this.loco.turnToward(ctx.aimX, ctx.aimZ, delta, ctx.mode === 'fight');
@@ -75,14 +91,21 @@ export class Bot {
         this.entity.playRecoil();
       }
       if (shot.fire && shot.damage > 0) {
-        onHitPlayer(shot.damage, `Bot-${this.index + 1}`);
+        onHit(shot.damage, target);
+      }
+      const closing = ctx.dist > BOT_IDEAL_SHOOT_RANGE
+        || (this.brain.wantsCloseIn() && ctx.dist > BOT_MIN_COMBAT_RANGE);
+      if (closing) {
+        let spd = this.speed * BOT_ADVANCE_SPEED_MULT;
+        if (this.brain.wantsCloseIn()) spd *= BOT_MISS_CLOSE_MULT;
+        this.loco.stepToward(target.x, target.z, delta, spd, BOT_MIN_COMBAT_RANGE);
       }
     } else {
       const { moved, pathIdx } = this.loco.stepAlongPath(
         this.brain.path,
         this.brain.pathIdx,
         delta,
-        this.speed,
+        this.speed * BOT_CHASE_SPEED_MULT,
       );
       this.brain.pathIdx = pathIdx;
 
@@ -103,6 +126,7 @@ export class Bot {
       kills:   this.kills,
       deaths:  this.deaths,
       assists: this.assists,
+      team:    this.team ?? null,
     };
   }
 
@@ -119,14 +143,14 @@ export class Bot {
         this.loco.nudgeFromSpawn();
         this.brain.reset();
         this.loco.stuckTime = 0;
-      });
+      }, this.noRespawn ? 0 : undefined);
       return true;
     }
     return false;
   }
 
-  updateHealthBar(camera, map) {
-    this.entity.updateHealthBar(camera, map);
+  updateHealthBar(camera, map, opts = {}) {
+    this.entity.updateHealthBar(camera, map, opts);
   }
 
   _emitFootstep(delta, sprint) {

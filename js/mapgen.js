@@ -16,6 +16,7 @@ import {
   W_LANE_Z, W_LANE_D, W_MID_X, W_MID_W, W_L_LX, W_R_LX,
   CITY_PILLARS, CITY_COVERS, CITY_DUMPSTERS, CITY_LAMPS,
   CITY_SPAWN_POINTS, CITY_AMMO_CHESTS, CITY_LANES,
+  LODIBIDON_CENTER, LODIBIDON_ALPHA_SPAWNS, LODIBIDON_OMEGA_SPAWNS,
 } from './maps/city.data.js';
 
 const CS = CELL_SIZE;
@@ -45,6 +46,11 @@ export class MapGenerator {
     this.spawnPoints = [...CITY_SPAWN_POINTS];
     this.ammoChests  = [...CITY_AMMO_CHESTS];
     this.lanes       = [...CITY_LANES];
+    this.lodibidonCenter = { ...LODIBIDON_CENTER };
+    this.lodibidonSpawns = {
+      alpha: LODIBIDON_ALPHA_SPAWNS.map(s => ({ ...s })),
+      omega: LODIBIDON_OMEGA_SPAWNS.map(s => ({ ...s })),
+    };
     this.rooms       = [];
     this.wallMeshes  = [];
     this.staticMeshes = [];

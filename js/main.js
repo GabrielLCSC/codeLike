@@ -15,6 +15,8 @@ const DEFAULTS = {
   adsMode:     'toggle',   // 'toggle' | 'hold'
   botCount:    3,
   botLevel:    'corporal', // 'private' | 'corporal' | 'commando' | 'veteran'
+  team:        'alpha',    // lodibidon: 'alpha' | 'omega'
+  gameType:    'ffa',      // 'ffa' | 'lodibidon'
 };
 
 function loadSettings() {
@@ -29,7 +31,8 @@ function saveSettings(s) {
 let settings = loadSettings();
 let activeGame = null;
 let mp = null;
-let pendingMode = null;  // 'solo' | 'multi' — set before loadout screen
+let pendingMode = null;     // 'solo' | 'multi' — transport
+let pendingGameType = 'ffa';  // 'ffa' | 'lodibidon'
 
 // ─── SCREEN MANAGER ──────────────────────────────────────
 function showScreen(id) {
@@ -188,18 +191,60 @@ function _startGame(mode, mpInstance) {
     activeGame = null;
   }
   syncUsernameFromAuth();
+  const isLodibidon = pendingGameType === 'lodibidon' || mpInstance?.gameMode === 'lodibidon';
   activeGame = new Game({
     mode,
+    gameType:  isLodibidon ? 'lodibidon' : 'ffa',
+    team:      settings.team,
     weapon:      settings.weapon,
     sensitivity: settings.sensitivity,
     fov:         settings.fov,
     username:    auth.displayName,
     adsMode:     settings.adsMode,
-    botCount:    settings.botCount,
+    botCount:    isLodibidon ? 0 : settings.botCount,
     botLevel:    settings.botLevel,
     mp:          mpInstance,
   });
   activeGame.start();
+}
+
+function showGametypeScreen(transport) {
+  pendingMode = transport;
+  const title = document.getElementById('gametype-title');
+  if (title) title.textContent = `${transport === 'solo' ? 'SOLO' : 'MULTIPLAYER'} — GAME TYPE`;
+  showScreen('screen-gametype');
+}
+
+function setLoadoutForGameType(gameType) {
+  pendingGameType = gameType;
+  settings.gameType = gameType;
+  saveSettings(settings);
+
+  const isLod = gameType === 'lodibidon';
+  document.getElementById('lodibidon-team-row').style.display = isLod ? '' : 'none';
+  document.getElementById('btn-confirm-loadout').classList.remove('hidden');
+  document.querySelectorAll('.bot-count-row').forEach(el => {
+    if (el.id === 'lodibidon-team-row') return;
+    el.style.display = isLod ? 'none' : '';
+  });
+  if (isLod) {
+    document.querySelectorAll('.team-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.team === settings.team);
+    });
+  }
+  setupGunCards();
+  showScreen('screen-loadout');
+}
+
+/** @deprecated use setLoadoutForGameType */
+function setLoadoutMode(mode) {
+  if (mode === 'lodibidon') {
+    pendingGameType = 'lodibidon';
+    setLoadoutForGameType('lodibidon');
+    return;
+  }
+  pendingMode = mode;
+  setLoadoutForGameType('ffa');
 }
 
 function handleRoomClosed() {
@@ -247,16 +292,36 @@ async function exitToMenu() {
 // ─── LOBBY UI ────────────────────────────────────────────
 function renderLobby(players) {
   const list = document.getElementById('lobby-player-list');
+  const isLod = mp?.gameMode === 'lodibidon';
   list.innerHTML = '';
   players.forEach((p, i) => {
     const div = document.createElement('div');
     div.className = 'lobby-player';
+    const teamTag = p.team
+      ? `<span class="lobby-player-team ${p.team}">${p.team.toUpperCase()}</span>`
+      : '';
     div.innerHTML =
       `<span class="lobby-player-num">${i + 1}</span>` +
-      `<span class="lobby-player-name">${p.name}${p.isHost ? ' 👑' : ''}</span>` +
+      `<span class="lobby-player-name">${p.name}${p.isHost ? ' 👑' : ''}${teamTag}</span>` +
       `<span class="lobby-player-weapon">${p.weapon.replace('_', ' ').toUpperCase()}</span>`;
     list.appendChild(div);
   });
+
+  if (isLod && mp?.isHost) {
+    const btn = document.getElementById('btn-start-game');
+    const alpha = mp.countTeam('alpha');
+    const omega = mp.countTeam('omega');
+    const total = players.length;
+    const ok = total >= 1 && alpha <= 2 && omega <= 2;
+    btn.disabled = !ok;
+    btn.title = ok ? '' : 'Need at least 1 player; max 2 per team (bots fill empty slots)';
+  }
+}
+
+function setLobbyLodibidonUI(isLod) {
+  document.getElementById('lobby-hint-ffa').classList.toggle('hidden', isLod);
+  document.getElementById('lobby-hint-lodibidon').classList.toggle('hidden', !isLod);
+  document.getElementById('lobby-team-pick').classList.toggle('hidden', !isLod);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -377,15 +442,54 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Main menu ────────────────────────────────────────
   document.getElementById('btn-solo').addEventListener('click', () => {
-    pendingMode = 'solo';
-    setupGunCards();
-    showScreen('screen-loadout');
+    showGametypeScreen('solo');
   });
 
   document.getElementById('btn-multiplayer').addEventListener('click', () => {
-    pendingMode = 'multi';
-    setupGunCards();
-    showScreen('screen-loadout');
+    showGametypeScreen('multi');
+  });
+
+  document.getElementById('btn-back-gametype').addEventListener('click', () => {
+    showScreen('screen-main');
+  });
+
+  document.getElementById('btn-gametype-classic').addEventListener('click', () => {
+    setLoadoutForGameType('ffa');
+  });
+
+  document.getElementById('btn-gametype-lodibidon').addEventListener('click', () => {
+    setLoadoutForGameType('lodibidon');
+  });
+
+  document.querySelectorAll('.team-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const team = btn.dataset.team;
+      if (mp && !mp.setTeam(team)) {
+        alert(`Team ${team.toUpperCase()} is full (max 2).`);
+        const me = mp.players.get(mp.uid);
+        const current = me?.team ?? settings.team;
+        document.querySelectorAll('.team-btn').forEach(b =>
+          b.classList.toggle('active', b.dataset.team === current),
+        );
+        return;
+      }
+      settings.team = team;
+      document.querySelectorAll('.team-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.team === settings.team),
+      );
+      saveSettings(settings);
+    });
+  });
+
+  document.getElementById('btn-lodibidon-exit')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const prevLabel = btn.textContent;
+    btn.textContent = 'LEAVING…';
+    await sound.fadeOutMatchEnd(3);
+    void exitToMenu();
   });
 
   document.getElementById('btn-settings').addEventListener('click', () => {
@@ -421,7 +525,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Loadout ──────────────────────────────────────────
   document.getElementById('btn-back-loadout').addEventListener('click', () => {
-    showScreen('screen-main');
+    document.getElementById('lodibidon-team-row').style.display = 'none';
+    document.querySelectorAll('.bot-count-row').forEach(el => {
+      if (el.id !== 'lodibidon-team-row') el.style.display = '';
+    });
+    showScreen('screen-gametype');
   });
 
   document.getElementById('btn-confirm-loadout').addEventListener('click', () => {
@@ -475,8 +583,13 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       mp = new MultiplayerManager();
       mp.init(auth.uid);
+      const isLod = pendingGameType === 'lodibidon';
+      if (isLod) mp.setGameMode('lodibidon');
 
-      const code = await mp.hostRoom(auth.displayName, settings.weapon);
+      const code = await mp.hostRoom(auth.displayName, settings.weapon, {
+        gameMode: isLod ? 'lodibidon' : 'ffa',
+        team:     isLod ? settings.team : null,
+      });
 
       document.getElementById('lbl-room-code').textContent = code;
       document.getElementById('btn-start-game').style.display = 'inline-block';
@@ -484,6 +597,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       mp.onLobbyUpdate = renderLobby;
       wireRoomClosedHandlers();
+      setLobbyLodibidonUI(isLod);
 
       showScreen('screen-lobby');
     } catch (e) {
@@ -500,8 +614,11 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       mp = new MultiplayerManager();
       mp.init(auth.uid);
+      const isLod = pendingGameType === 'lodibidon';
 
-      await mp.joinRoom(code, auth.displayName, settings.weapon);
+      await mp.joinRoom(code, auth.displayName, settings.weapon, {
+        team: isLod ? settings.team : null,
+      });
 
       document.getElementById('lbl-room-code').textContent = code;
       document.getElementById('btn-start-game').style.display = 'none';
@@ -510,6 +627,7 @@ document.addEventListener('DOMContentLoaded', () => {
       mp.onLobbyUpdate = renderLobby;
       mp.onGameStart   = () => launchGame('multi', mp);
       wireRoomClosedHandlers();
+      setLobbyLodibidonUI(mp.gameMode === 'lodibidon');
 
       showScreen('screen-lobby');
     } catch (e) {

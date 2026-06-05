@@ -6,6 +6,15 @@
 /** Cap Retina DPR (1.5 ≈ sharp on MacBook, much cheaper than 2). */
 export const MAX_PIXEL_RATIO = 1.5;
 
+// ─── LODIBIDON (2v2 round mode) ──────────────────────────────
+export const LODIBIDON_ROUND_TIME_S    = 120;
+export const LODIBIDON_PREP_TIME_S     = 3;
+export const LODIBIDON_CAPTURE_TIME_S  = 5;
+export const LODIBIDON_CAPTURE_RADIUS  = 4.5;
+export const LODIBIDON_ROUNDS_TO_WIN   = 6;
+export const LODIBIDON_ROUND_PAUSE_S   = 4;
+export const LODIBIDON_TEAM_SIZE       = 2;
+
 // ─── MAP ─────────────────────────────────────────────────────
 export const MAP_W       = 44;   // grid cells wide
 export const MAP_H       = 44;   // grid cells tall
@@ -126,9 +135,17 @@ export const BOT_RESPAWN_MS = 14000;   // ms before bot respawns
 
 /** Shared bot movement / combat (same for every difficulty). */
 export const BOT_SPEED         = 4.5;   // march speed (world units / s)
+export const BOT_CHASE_SPEED_MULT   = 1.38; // faster while pathing to target
+export const BOT_ADVANCE_SPEED_MULT = 1.25; // faster while closing in combat
+export const BOT_MISS_CLOSE_MULT    = 1.2;  // extra closing speed after missed shots
+export const BOT_MISS_ADVANCE_THRESHOLD = 2; // consecutive misses before pushing in
 export const BOT_ATTACK_RANGE  = 22;    // start shooting with LOS within this range
+export const BOT_IDEAL_SHOOT_RANGE = 11; // bots advance closer while fighting above this
+export const BOT_MIN_COMBAT_RANGE  = 2.0; // stop closing — don't hug targets
 export const BOT_SHOOT_MIN     = 850;   // ms between shots (base)
 export const BOT_SHOOT_JITTER  = 550;
+/** Extra hit chance added to lodibidon bot accuracy. */
+export const LODIBIDON_BOT_HIT_BONUS = 0.24;
 /** Seconds between path replans (base). */
 export const BOT_REPLAN_INTERVAL = 0.65;
 /** Replan early when the player moves at least this far (world units²). */

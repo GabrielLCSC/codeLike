@@ -38,7 +38,17 @@ const SOUND_FILES = {
   ui_click:      'sounds/ui/ui_click.mp3',
   kill_confirm:  'sounds/ui/kill_confirm.mp3',
 
-  // ── Kill voice lines — drop in sounds/voice/ (kill_1 … kill_6) ─
+  // ── Lodibidon mode — drop in sounds/lodibidon/ ───────────
+  lodibidon_round_end:     'sounds/lodibidon/round_end.mp3',
+  lodibidon_match_end:     'sounds/lodibidon/match_end.mp3',
+  lodibidon_kill_ally:     'sounds/lodibidon/kill_ally.mp3',
+  lodibidon_kill_confirm:  'sounds/lodibidon/kill_enemy_lodibidon.mp3', // local kill (Lodibidon only)
+  classic_kill_enemy_1:    'sounds/lodibidon/kill_enemy_1.mp3',  // classic streak 1–2, 11+
+  classic_kill_enemy_3:    'sounds/lodibidon/kill_enemy_3.mp3',  // classic streak 3–9
+  classic_kill_enemy_10:   'sounds/lodibidon/kill_enemy_10.mp3', // classic streak 10 only
+
+  // ── Voice — drop in sounds/voice/ ────────────────────────
+  voice_last_one:    'sounds/voice/last_one.mp3',  // "I'm the last one" (solo survivor)
   kill_voice_1:  'sounds/voice/kill_1.mp3',
   kill_voice_2:  'sounds/voice/kill_2.mp3',
   kill_voice_3:  'sounds/voice/kill_3.mp3',
@@ -58,6 +68,9 @@ const SOUND_FILES = {
   ambiance_wind: 'sounds/ambiance/ambiance_wind.mp3',
   ambiance_distant: 'sounds/ambiance/ambiance_distant.mp3',
 };
+
+const VOICE_VOLUME = 0.62;
+const MEDAL_VOLUME = 0.72;
 
 /** Looping ambiance layers played together during a match. */
 const AMBIANCE_PROFILES = {
@@ -94,6 +107,14 @@ class SoundManager {
     this._loopSources = new Map();
     this._killVoiceIdx = 0;
     this._killVoiceKeys = [];
+    /** @type {{ src: AudioBufferSourceNode, gain: GainNode }|null} */
+    this._voiceHandle = null;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this._voiceTimer = null;
+    /** @type {{ src: AudioBufferSourceNode, gain: GainNode }|null} */
+    this._medalHandle = null;
+    /** @type {{ src: AudioBufferSourceNode, gain: GainNode }|null} */
+    this._matchEndHandle = null;
   }
 
   // ─── INIT (call once after first user gesture) ────────────
@@ -135,17 +156,125 @@ class SoundManager {
    * @returns {AudioBufferSourceNode|null}
    */
   play(key, { volume = 1, pitch = 1, loop = false } = {}) {
+    return this._playSfx(key, { volume, pitch, loop })?.src ?? null;
+  }
+
+  /**
+   * @returns {{ src: AudioBufferSourceNode, gain: GainNode }|null}
+   */
+  _playSfx(key, { volume = 1, pitch = 1, loop = false } = {}) {
     if (!this._ready || !this._buffers.has(key)) return null;
     const src  = this._ctx.createBufferSource();
     const gain = this._ctx.createGain();
     src.buffer             = this._buffers.get(key);
-    src.playbackRate.value = pitch + (Math.random() - 0.5) * 0.05; // tiny natural variation
+    src.playbackRate.value = pitch + (Math.random() - 0.5) * 0.05;
     src.loop               = loop;
     gain.gain.value        = volume;
     src.connect(gain);
     gain.connect(this._sfxGain);
     src.start(0);
-    return src;
+    return { src, gain };
+  }
+
+  _isVoicePlaying() {
+    return !!this._voiceHandle || !!this._voiceTimer;
+  }
+
+  _stopVoice() {
+    clearTimeout(this._voiceTimer);
+    this._voiceTimer = null;
+    if (this._voiceHandle) {
+      try { this._voiceHandle.src.stop(); } catch {}
+      this._voiceHandle = null;
+    }
+  }
+
+  _stopMedal() {
+    if (this._medalHandle) {
+      try { this._medalHandle.src.stop(); } catch {}
+      this._medalHandle = null;
+    }
+  }
+
+  /** Stop kill voice, last-one line, and medal stingers (e.g. round end). */
+  stopVoiceAndMedals() {
+    this._stopVoice();
+    this._stopMedal();
+  }
+
+  /**
+   * Exclusive voice line — skips if another voice is playing or scheduled.
+   * @returns {boolean} whether playback started (or was scheduled)
+   */
+  playVoiceLine(key, { volume = VOICE_VOLUME, pitch = 1, delayMs = 0 } = {}) {
+    if (!this._buffers.has(key)) return false;
+
+    const start = () => {
+      if (this._voiceHandle) return false;
+      const handle = this._playSfx(key, {
+        volume,
+        pitch: pitch + (Math.random() - 0.5) * 0.04,
+      });
+      if (!handle) return false;
+      this._voiceHandle = handle;
+      handle.src.onended = () => {
+        if (this._voiceHandle === handle) this._voiceHandle = null;
+      };
+      return true;
+    };
+
+    if (delayMs > 0) {
+      if (this._isVoicePlaying()) return false;
+      clearTimeout(this._voiceTimer);
+      this._voiceTimer = setTimeout(() => {
+        this._voiceTimer = null;
+        if (!this._voiceHandle) start();
+      }, delayMs);
+      return true;
+    }
+
+    if (this._isVoicePlaying()) return false;
+    this._stopVoice();
+    return start();
+  }
+
+  /** Medal sting — tracked separately from voice but cleared together on round end. */
+  playMedalSound(key) {
+    this._stopMedal();
+    const handle = this._playSfx(key, { volume: MEDAL_VOLUME });
+    if (!handle) return;
+    this._medalHandle = handle;
+    handle.src.onended = () => {
+      if (this._medalHandle === handle) this._medalHandle = null;
+    };
+  }
+
+  /** Fade out match-end music over `durationSec` (default 3s). */
+  fadeOutMatchEnd(durationSec = 3) {
+    return new Promise(resolve => {
+      const handle = this._matchEndHandle;
+      if (!handle?.gain || !this._ctx) {
+        resolve();
+        return;
+      }
+      const now = this._ctx.currentTime;
+      const g   = handle.gain.gain;
+      g.cancelScheduledValues(now);
+      g.setValueAtTime(g.value, now);
+      g.linearRampToValueAtTime(0, now + durationSec);
+      setTimeout(() => {
+        try { handle.src.stop(); } catch {}
+        if (this._matchEndHandle === handle) this._matchEndHandle = null;
+        resolve();
+      }, durationSec * 1000 + 80);
+    });
+  }
+
+  stopMatchEnd() {
+    if (this._matchEndHandle) {
+      try { this._matchEndHandle.src.stop(); } catch {}
+      this._matchEndHandle = null;
+    }
   }
 
   /** Play a shoot sound for the given weapon key.
@@ -377,19 +506,66 @@ class SoundManager {
    * Occasional kill voice line — not every kill; rotates through loaded clips.
    * @param {number} [chance=0.38] — 0–1 probability per kill
    */
-  playKillVoice(chance = 0.38, delayMs = 0) {
+  playKillVoice(chance = 0.38, delayMs = 300) {
     if (this._killVoiceKeys.length === 0 || Math.random() > chance) return;
-    const playLine = () => {
-      const key = this._killVoiceKeys[this._killVoiceIdx % this._killVoiceKeys.length];
-      this._killVoiceIdx++;
-      this.play(key, { volume: 0.85, pitch: 0.95 + Math.random() * 0.1 });
-    };
-    if (delayMs > 0) setTimeout(playLine, delayMs);
-    else playLine();
+    if (this._isVoicePlaying()) return;
+    const key = this._killVoiceKeys[this._killVoiceIdx % this._killVoiceKeys.length];
+    this._killVoiceIdx++;
+    this.playVoiceLine(key, {
+      volume: VOICE_VOLUME,
+      pitch:  0.95 + Math.random() * 0.1,
+      delayMs,
+    });
   }
 
   /** No-op (legacy); tactical sprint uses playTacticalSprintStep. */
   stopTacticalSprintLoop() {}
+
+  /** Round won/lost sting (Lodibidon) — cuts voice/medals first. */
+  playLodibidonRoundEnd() {
+    this.stopVoiceAndMedals();
+    this.play('lodibidon_round_end', { volume: 0.72 });
+  }
+
+  /** ~15s match-end music — stops ambiance first. */
+  playLodibidonMatchEnd() {
+    this.stopAmbiance();
+    this.stopMatchEnd();
+    const handle = this._playSfx('lodibidon_match_end', { volume: 0.58 });
+    if (handle) {
+      this._matchEndHandle = handle;
+      handle.src.onended = () => {
+        if (this._matchEndHandle === handle) this._matchEndHandle = null;
+      };
+    }
+  }
+
+  /** Teammate scored (Lodibidon observer sting). */
+  playLodibidonTeamKill(allyKill) {
+    if (allyKill) this.play('lodibidon_kill_ally', { volume: 0.68 });
+  }
+
+  /** Local player eliminated an enemy (Lodibidon only). */
+  playLodibidonKillConfirm() {
+    this.play('lodibidon_kill_confirm', { volume: 0.68 });
+  }
+
+  /** Classic FFA kill sting — tiered by current streak. */
+  playClassicKillConfirm(streak) {
+    let key = 'classic_kill_enemy_1';
+    if (streak === 10) key = 'classic_kill_enemy_10';
+    else if (streak >= 3 && streak <= 9) key = 'classic_kill_enemy_3';
+    this.play(key, { volume: 0.68 });
+  }
+
+  /** Local player is the last ally alive this round. */
+  playLastOneStanding() {
+    if (this._isVoicePlaying()) return;
+    this.playVoiceLine('voice_last_one', {
+      volume: VOICE_VOLUME,
+      pitch:  0.98 + Math.random() * 0.04,
+    });
+  }
 
   async _load(key, path) {
     // Try the listed extension first, then the two common alternatives.

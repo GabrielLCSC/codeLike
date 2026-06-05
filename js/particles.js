@@ -49,6 +49,28 @@ export class ParticleSystem {
     setTimeout(() => this._scene.remove(flash), 70);
   }
 
+  /** Bright muzzle flash visible in world space (players + bots). */
+  spawnMuzzleFlash(point, direction) {
+    const fwd = direction.clone().normalize();
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xffcc66,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+    });
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), coreMat);
+    core.position.copy(point).addScaledVector(fwd, 0.02);
+    this._scene.add(core);
+    this._bursts.push({ mesh: core, life: 0.075, maxLife: 0.075, peak: 2.6, kind: 'fire' });
+
+    const flash = new THREE.PointLight(0xffaa44, 20, 6);
+    flash.position.copy(point);
+    this._scene.add(flash);
+    this._flashLights.push({ light: flash, life: 0.085, maxLife: 0.085 });
+
+    this.spawnMuzzleSmoke(point, fwd);
+  }
+
   /** Subtle muzzle smoke puffs after a shot (world space). */
   spawnMuzzleSmoke(point, direction) {
     const fwd = direction.clone().normalize();

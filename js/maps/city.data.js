@@ -130,6 +130,17 @@ export const CITY_LANES = [
   },
 ];
 
+/** Lodibidon — fixed 2 spawns per team, facing map centre. */
+export const LODIBIDON_CENTER = { x: W_MID_X, z: W_LANE_Z };
+export const LODIBIDON_ALPHA_SPAWNS = [
+  { x: wx(10), z: wz(4) },
+  { x: wx(22), z: wz(5) },
+];
+export const LODIBIDON_OMEGA_SPAWNS = [
+  { x: wx(10), z: wz(38) },
+  { x: wx(22), z: wz(38) },
+];
+
 export const CITY_MAP_META = {
   id:     'city',
   width:  MAP_W,

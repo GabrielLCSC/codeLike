@@ -47,7 +47,13 @@ export class BotLocomotion {
   }
 
   nearSpawn(x, z) {
-    for (const sp of this.map.spawnPoints ?? []) {
+    const points = [...(this.map.spawnPoints ?? [])];
+    for (const team of ['alpha', 'omega']) {
+      for (const sp of this.map.lodibidonSpawns?.[team] ?? []) {
+        points.push(sp);
+      }
+    }
+    for (const sp of points) {
       if (Math.hypot(x - sp.x, z - sp.z) < SPAWN_OCCUPANCY_RADIUS) return true;
     }
     return false;
@@ -106,6 +112,40 @@ export class BotLocomotion {
 
     this.stuckTime = 0;
     return { moved: false, pathIdx: idx };
+  }
+
+  /** Direct step toward a world point (combat closing / short reposition). */
+  stepToward(tx, tz, delta, speed, minDist = 0.4) {
+    const dx   = tx - this.x;
+    const dz   = tz - this.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist <= minDist) {
+      this.stuckTime += delta;
+      return false;
+    }
+    const step = Math.min(speed * delta, Math.max(0, dist - minDist));
+    const ux   = dx / dist;
+    const uz   = dz / dist;
+    const nx   = this.x + ux * step;
+    const nz   = this.z + uz * step;
+    if (this.canWalk(nx, nz)) {
+      this.mesh.position.x = nx;
+      this.mesh.position.z = nz;
+      this.stuckTime = 0;
+      return true;
+    }
+    if (this.canWalk(nx, this.z)) {
+      this.mesh.position.x = nx;
+      this.stuckTime = 0;
+      return true;
+    }
+    if (this.canWalk(this.x, nz)) {
+      this.mesh.position.z = nz;
+      this.stuckTime = 0;
+      return true;
+    }
+    this.stuckTime += delta;
+    return false;
   }
 
   turnToward(tx, tz, delta, sharp = false) {

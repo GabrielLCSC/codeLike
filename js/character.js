@@ -8,22 +8,22 @@ import * as THREE from 'three';
 // ─── TEAM PALETTES ───────────────────────────────────────────
 const TEAMS = {
   enemy: {
-    uniform:     0x5c6354,   // khaki-olive
+    uniform:     0x5c6354,
     uniformDark: 0x3e4438,
-    vest:        0x2f3528,   // dark olive vest
-    plate:       0x484e44,   // grey-green plate
+    vest:        0x2f3528,
+    plate:       0x484e44,
     helmet:      0x3a4038,
     visor:       0x1c2218,
     skin:        0x7a6e5c,
     glove:       0x242420,
     boot:        0x141414,
     metal:       0x2c2c28,
-    nameColor:   '#a8a898',
+    nameColor:   '#ff5555',
     labelColor:  0x6a7a5a,
     barBg:       0x222220,
   },
   ally: {
-    uniform:     0x525a4e,   // cool khaki
+    uniform:     0x525a4e,
     uniformDark: 0x383e36,
     vest:        0x2a3228,
     plate:       0x424840,
@@ -33,11 +33,47 @@ const TEAMS = {
     glove:       0x222220,
     boot:        0x121212,
     metal:       0x282826,
-    nameColor:   '#b0b8a8',
+    nameColor:   '#55aaff',
     labelColor:  0x5a6a52,
     barBg:       0x1e1e1c,
   },
+  /** Lodibidon ALPHA — white / light grey body */
+  alpha: {
+    uniform:     0xd4d4dc,
+    uniformDark: 0xa8a8b4,
+    vest:        0xb8b8c4,
+    plate:       0xc8c8d0,
+    helmet:      0xbcbcc8,
+    visor:       0x686878,
+    skin:        0xd0d0d8,
+    glove:       0x909098,
+    boot:        0x505058,
+    metal:       0x888890,
+    nameColor:   '#55aaff',
+    labelColor:  0x88aacc,
+    barBg:       0x2a2a32,
+  },
+  /** Lodibidon OMEGA — black / dark grey body */
+  omega: {
+    uniform:     0x2a2a32,
+    uniformDark: 0x18181e,
+    vest:        0x222228,
+    plate:       0x383840,
+    helmet:      0x1e1e24,
+    visor:       0x0a0a0e,
+    skin:        0x484850,
+    glove:       0x141418,
+    boot:        0x0a0a0c,
+    metal:       0x303038,
+    nameColor:   '#ff5555',
+    labelColor:  0xaa4444,
+    barBg:       0x141418,
+  },
 };
+
+/** Ally=blue, enemy=red name colours (lodibidon + general). */
+export const LABEL_COLOR_ALLY  = '#55aaff';
+export const LABEL_COLOR_ENEMY = '#ff5555';
 
 // ─── GEOMETRY HELPERS ─────────────────────────────────────────
 function part(group, shape, mat, params, pos, rot = [0, 0, 0]) {
@@ -94,12 +130,21 @@ function buildHeldWeapon(parent, mats) {
 /**
  * Build a detailed soldier mesh.
  * @param {object} opts
- * @param {'enemy'|'ally'} [opts.team='enemy']
+ * @param {'enemy'|'ally'|'alpha'|'omega'} [opts.team='enemy']
+ * @param {'ally'|'enemy'} [opts.labelRole] — overrides name colour (blue/red)
  * @param {string}         [opts.name='Soldier']
  * @param {boolean}        [opts.showHealthBar=true]
  */
-export function buildCharacterMesh({ team = 'enemy', name = 'Soldier', showHealthBar = true } = {}) {
+export function buildCharacterMesh({
+  team = 'enemy',
+  labelRole = null,
+  name = 'Soldier',
+  showHealthBar = true,
+} = {}) {
   const palette = TEAMS[team] ?? TEAMS.enemy;
+  const nameColor = labelRole === 'ally' ? LABEL_COLOR_ALLY
+    : labelRole === 'enemy' ? LABEL_COLOR_ENEMY
+    : palette.nameColor;
   const mats    = makeMats(team);
   const root    = new THREE.Group();
 
@@ -198,14 +243,14 @@ export function buildCharacterMesh({ team = 'enemy', name = 'Soldier', showHealt
 
   // ── Name label ───────────────────────────────────────────
   const nameCanvas = document.createElement('canvas');
-  nameCanvas.width = 256; nameCanvas.height = 48;
+  nameCanvas.width = 320; nameCanvas.height = 64;
   const nc = nameCanvas.getContext('2d');
-  nc.font = 'bold 22px "Rajdhani", sans-serif';
-  nc.fillStyle = palette.nameColor;
+  nc.font = 'bold 32px "Rajdhani", sans-serif';
+  nc.fillStyle = nameColor;
   nc.textAlign = 'center';
   nc.shadowColor = 'rgba(0,0,0,0.85)';
-  nc.shadowBlur = 6;
-  nc.fillText(name, 128, 34);
+  nc.shadowBlur = 8;
+  nc.fillText(name, 160, 44);
   const labelMat = {
     transparent: true,
     depthTest: true,
@@ -220,7 +265,7 @@ export function buildCharacterMesh({ team = 'enemy', name = 'Soldier', showHealt
   root.add(overhead);
 
   const nameSprite = new THREE.Mesh(
-    new THREE.PlaneGeometry(1.05, 0.20),
+    new THREE.PlaneGeometry(1.35, 0.26),
     new THREE.MeshBasicMaterial({
       map: new THREE.CanvasTexture(nameCanvas),
       ...labelMat,
@@ -412,19 +457,29 @@ export const OVERHEAD_LABEL_REF_DIST = 7;
 
 const _overheadAnchor = new THREE.Vector3();
 
+/** Max distance for ally labels in lodibidon (always on radar). */
+export const OVERHEAD_ALLY_MAX_DIST = 140;
+
 /**
  * Billboard name/health UI: LOS + distance gate, depth-tested (no wall x-ray),
  * constant apparent size regardless of distance.
  * @param {THREE.Object3D} mesh
  * @param {THREE.Camera} camera
  * @param {{ hasLOS: (x1,z1,x2,z2)=>boolean }|null} map
- * @param {{ healthBar?: THREE.Mesh, healthRatio?: number, visible?: boolean }} [opts]
+ * @param {{ healthBar?: THREE.Mesh, healthRatio?: number, visible?: boolean, alwaysShow?: boolean, skipLos?: boolean, maxDist?: number }} [opts]
  */
 export function updateCharacterOverheadUI(mesh, camera, map, opts = {}) {
   const overhead = mesh.getObjectByName('overheadUi');
   if (!overhead) return;
 
-  const { healthBar, healthRatio = 1, visible: forceVisible = true } = opts;
+  const {
+    healthBar,
+    healthRatio = 1,
+    visible: forceVisible = true,
+    alwaysShow = false,
+    skipLos = false,
+    maxDist = OVERHEAD_LABEL_MAX_DIST,
+  } = opts;
   if (!forceVisible) {
     overhead.visible = false;
     return;
@@ -432,14 +487,15 @@ export function updateCharacterOverheadUI(mesh, camera, map, opts = {}) {
 
   overhead.getWorldPosition(_overheadAnchor);
   const dist = camera.position.distanceTo(_overheadAnchor);
-  const inRange = dist >= OVERHEAD_LABEL_MIN_DIST && dist <= OVERHEAD_LABEL_MAX_DIST;
-  const hasLOS = !map || map.hasLOS(
+  const rangeMax = alwaysShow ? OVERHEAD_ALLY_MAX_DIST : maxDist;
+  const inRange = dist >= OVERHEAD_LABEL_MIN_DIST && dist <= rangeMax;
+  const hasLOS = skipLos || alwaysShow || !map || map.hasLOS(
     camera.position.x,
     camera.position.z,
     _overheadAnchor.x,
     _overheadAnchor.z,
   );
-  const show = inRange && hasLOS;
+  const show = inRange && (alwaysShow || hasLOS);
   overhead.visible = show;
   if (!show) return;
 
