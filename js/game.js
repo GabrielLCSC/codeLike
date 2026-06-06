@@ -40,6 +40,7 @@ import { MovementController } from './player/movement-controller.js';
 import { MapEditor } from './maps/map-editor.js';
 import { createEmptyMapData } from './maps/map-schema.js';
 import { initMapModels } from './maps/model-loader.js';
+import { initWeaponModels } from './weapons/gun-parts.js';
 import { setModelTools } from './maps/asset-catalog.js';
 
 export class Game {
@@ -199,7 +200,11 @@ export class Game {
     await this._preloadMapModels();
 
     if (this.editorMode) {
-      await this._startEditorSession();
+      const ok = await this._startEditorSession();
+      if (!ok) {
+        this._abortEditorLaunch();
+        return;
+      }
       return;
     }
 
@@ -275,19 +280,33 @@ export class Game {
   }
 
   async _preloadMapModels() {
-    setModelTools(await initMapModels());
+    const [models] = await Promise.all([initMapModels(), initWeaponModels()]);
+    setModelTools(models);
   }
 
   async _startEditorSession() {
     this.hud = new HUD();
     this.hud.hide();
-    this.map = new MapGenerator();
-    this.map.generateFromEditorData(createEmptyMapData());
-    this.map.buildScene(this.scene);
-    await this.mapEditor.enter();
+
+    if (!this.map) this.map = new MapGenerator();
+    if (this.scene && this.camera) this.scene.add(this.camera);
+
+    const ok = await this.mapEditor.enter({
+      mapData: createEmptyMapData(),
+    });
+    if (!ok) return false;
+
     document.getElementById('pointer-lock-overlay')?.classList.add('hidden');
     this.running = true;
     this._loop();
+    return true;
+  }
+
+  _abortEditorLaunch() {
+    this.running = false;
+    this.mapEditor?.exit();
+    document.getElementById('map-editor-panel')?.classList.add('hidden');
+    document.getElementById('menu-overlay').style.display = '';
   }
 
   /** Request pointer lock (call from launch click or canvas mousedown). */
@@ -398,6 +417,7 @@ export class Game {
     this.mapId = mapId;
     this.map = new MapGenerator(mapId).generate(mapId);
     this.map.buildScene(this.scene);
+    this.map.finalizeMeshCollision(this.scene);
     const mapName = getMapGameplay(mapId).meta.name;
     const tag = document.getElementById('hud-map-tag');
     if (tag) tag.textContent = mapName;

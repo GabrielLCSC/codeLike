@@ -5,7 +5,6 @@
 import { MAP_W, MAP_H, CELL_SIZE } from '../config.js';
 import {
   standardSpawnPoints,
-  standardAmmoChests,
   standardLodibidon,
   standardLanes,
 } from './lane-layout.js';
@@ -14,8 +13,11 @@ import {
   getAssetDef,
   getToolDefForType,
 } from './asset-catalog.js';
+import { resolveMapTheme } from './map-theme.js';
 
 export const MAP_SCHEMA_VERSION = 1;
+export const MIN_MAP_CELLS = 16;
+export const MAX_MAP_CELLS = 80;
 
 /** Perimeter wall thickness in grid cells (matches visual wall depth in custom-map-scene). */
 export const CUSTOM_MAP_BORDER_CELLS = 2;
@@ -38,6 +40,10 @@ export function defaultCustomOpenRects(width = MAP_W, height = MAP_H) {
  * @property {number} gx
  * @property {number} gz
  * @property {string} [modelId] — required when type === 'model'
+ * @property {boolean} [blocks] — collision (saved with placed models)
+ * @property {'wall'|'cover'|'pillar'} [gridKind]
+ * @property {[number, number]} [footprint] — grid cells [width, depth]
+ * @property {number} [yOffset]
  */
 
 /**
@@ -46,6 +52,7 @@ export function defaultCustomOpenRects(width = MAP_W, height = MAP_H) {
  * @property {{ id: string, name: string, description?: string, width: number, height: number, scene?: string }} meta
  * @property {MapAsset[]} assets
  * @property {{ x: number, z: number, w: number, h: number, kind?: string }[]} [openRects]
+ * @property {{ timeOfDay?: 'day'|'night' }} [theme]
  */
 
 /** @param {string} name */
@@ -69,27 +76,86 @@ export function snapWorldToCell(x, z, cellSize = CELL_SIZE) {
   };
 }
 
+/** @param {number} n @param {number} [fallback] */
+export function clampMapSize(n, fallback = MAP_W) {
+  const v = Number.parseInt(n, 10);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(MIN_MAP_CELLS, Math.min(MAX_MAP_CELLS, v));
+}
+
+/** @returns {{ width: number, height: number }|null} */
+export function promptMapDimensions(defaultW = MAP_W, defaultH = MAP_H) {
+  const ans = window.prompt(
+    `Map size — width x height (${MIN_MAP_CELLS}–${MAX_MAP_CELLS} cells):`,
+    `${defaultW}x${defaultH}`,
+  );
+  if (ans === null) return null;
+  return parseMapDimensionsInput(ans, defaultW, defaultH);
+}
+
+/** @param {string} str @param {number} defaultW @param {number} defaultH */
+export function parseMapDimensionsInput(str, defaultW = MAP_W, defaultH = MAP_H) {
+  const trimmed = str.trim();
+  const pair = trimmed.match(/^(\d+)\s*[x×,]\s*(\d+)$/i);
+  if (pair) {
+    return {
+      width:  clampMapSize(pair[1], defaultW),
+      height: clampMapSize(pair[2], defaultH),
+    };
+  }
+  const single = Number.parseInt(trimmed, 10);
+  if (Number.isFinite(single)) {
+    const n = clampMapSize(single);
+    return { width: n, height: n };
+  }
+  return { width: defaultW, height: defaultH };
+}
+
 /** @returns {CustomMapData} */
 export function createEmptyMapData(overrides = {}) {
+  const meta = {
+    id:          'custom-draft',
+    name:        'Untitled Map',
+    description: 'Custom map created in the editor.',
+    width:       MAP_W,
+    height:      MAP_H,
+    scene:       'custom',
+    ...overrides.meta,
+  };
+  const w = meta.width ?? MAP_W;
+  const h = meta.height ?? MAP_H;
   return {
     version: MAP_SCHEMA_VERSION,
-    meta: {
-      id:          'custom-draft',
-      name:        'Untitled Map',
-      description: 'Custom map created in the editor.',
-      width:       MAP_W,
-      height:      MAP_H,
-      scene:       'custom',
-      ...overrides.meta,
-    },
-    openRects: defaultCustomOpenRects(),
+    meta,
+    theme: { timeOfDay: 'day', ...overrides.theme },
+    openRects: defaultCustomOpenRects(w, h),
     assets: [],
     ...overrides,
   };
 }
 
+/** @param {import('./map-schema.js').CustomMapData} data */
+export function normalizeMapData(data) {
+  if (!data || typeof data !== 'object') return data;
+  if (!data.meta) data.meta = { id: 'custom-draft', name: 'Untitled Map', width: MAP_W, height: MAP_H };
+  if (!data.meta.width) data.meta.width = MAP_W;
+  if (!data.meta.height) data.meta.height = MAP_H;
+  if (!Array.isArray(data.assets)) {
+    data.assets = data.assets && typeof data.assets === 'object'
+      ? Object.values(data.assets)
+      : [];
+  }
+  if (!data.theme || typeof data.theme !== 'object') {
+    data.theme = { timeOfDay: 'day' };
+  } else if (!data.theme.timeOfDay) {
+    data.theme = { timeOfDay: 'day' };
+  }
+  return data;
+}
+
 /** @param {CustomMapData} data */
 export function validateMapData(data) {
+  normalizeMapData(data);
   if (!data || typeof data !== 'object') throw new Error('Invalid map data.');
   if (!data.meta?.id || !data.meta?.name) throw new Error('Map must have meta.id and meta.name.');
   if (!Array.isArray(data.assets)) throw new Error('Map assets must be an array.');
@@ -145,7 +211,9 @@ export function mapDataToGameplay(data) {
     const pos = { x: a.x, z: a.z };
     const def = getAssetDef(a);
 
-    if (def?.blocks && def.gridKind) {
+    // Custom maps use Blender COL mesh colliders baked at scene build — skip grid footprints.
+    const useMeshCollision = data.meta?.scene === 'custom';
+    if (!useMeshCollision && def?.blocks && def.gridKind) {
       for (const [gx, gz] of assetFootprintCells(a)) {
         pushBlockedCells(gx, gz, def.gridKind, pillars, covers);
       }
@@ -185,7 +253,7 @@ export function mapDataToGameplay(data) {
     doors:       { rows: [], left: [], right: [] },
     spawnPoints: spawnPoints.length ? spawnPoints : standardSpawnPoints(),
     spawnPve,
-    ammoChests:  ammoChests.length ? ammoChests : standardAmmoChests(),
+    ammoChests,
     groundWeapons: [],
     groundMags:    [],
     lanes:       standardLanes(),
@@ -200,9 +268,7 @@ export function mapDataToGameplay(data) {
     lamps: [],
     customAssets: data.assets,
     theme: {
-      sky: 0x8899aa,
-      fog: 0x8899aa,
-      fogDensity: 0.016,
+      timeOfDay: data.theme?.timeOfDay === 'night' ? 'night' : 'day',
     },
     sceneProfile: {
       palette: {

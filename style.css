@@ -1362,6 +1362,38 @@ html, body {
 .editor-tool-group-title:first-child {
   margin-top: 0;
 }
+.editor-size-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  margin-bottom: 8px;
+}
+.editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  font-size: 10px;
+  color: #888;
+  letter-spacing: 1px;
+}
+.editor-field input {
+  width: 100%;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #eee;
+  font-family: inherit;
+  font-size: 12px;
+}
+.editor-time-row {
+  display: flex;
+  gap: 6px;
+}
+.editor-time-row .editor-tool-btn {
+  flex: 1;
+  text-align: center;
+}
 .editor-tool-btn {
   text-align: left;
   padding: 8px 10px;

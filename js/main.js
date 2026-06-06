@@ -8,6 +8,7 @@ import { sound }              from './sound.js';
 import { auth, USER_SETTINGS_DEFAULTS } from './auth.js';
 import { MAP_CATALOG, getMapCatalog, getMapGameplay, prefetchCustomMapsFromFirebase } from './maps/index.js';
 import { initMapModels } from './maps/model-loader.js';
+import { initWeaponModels } from './weapons/gun-parts.js';
 import { setModelTools } from './maps/asset-catalog.js';
 
 // ─── SETTINGS (local cache + Firebase per user) ───────────
@@ -175,7 +176,7 @@ async function showAppMenu() {
   document.getElementById('auth-overlay').style.display = 'none';
   document.getElementById('menu-overlay').style.display = '';
   await refreshSettingsFromDb();
-  const models = await initMapModels();
+  const [models] = await Promise.all([initMapModels(), initWeaponModels()]);
   setModelTools(models);
   await prefetchCustomMapsFromFirebase();
   syncUsernameFromAuth();
@@ -257,7 +258,12 @@ function launchMapEditor() {
     username:    auth.displayName,
     adsMode:     settings.adsMode,
   });
-  activeGame.start();
+  void activeGame.start().then(() => {
+    if (!activeGame?.running) {
+      activeGame?.stop({ leaveRoom: false });
+      activeGame = null;
+    }
+  });
 }
 
 function _startGame(mode, mpInstance) {

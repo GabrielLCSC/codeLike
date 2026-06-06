@@ -109,7 +109,10 @@ export class GridPathfinder {
    * Nearest stand cell from which the bot can see the target (peek / flank goal).
    * @returns {{ x:number, z:number }|null}
    */
-  findNearestLosCell(fromX, fromZ, targetX, targetZ, radius = 10) {
+  findNearestLosCell(fromX, fromZ, targetX, targetZ, radius) {
+    if (radius == null) {
+      radius = this.map.collisionWorld?.active ? 14 : 10;
+    }
     const { gx: cx, gz: cz } = this.worldToCell(targetX, targetZ);
     let best     = null;
     let bestDist = Infinity;

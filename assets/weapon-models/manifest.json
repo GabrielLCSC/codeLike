@@ -1,0 +1,29 @@
+{
+  "weapons": [
+    {
+      "id": "assault_rifle",
+      "file": "assault_rifle.glb",
+      "label": "Assault Rifle"
+    },
+    {
+      "id": "ak47",
+      "file": "ak47.glb",
+      "label": "AK47"
+    },
+    {
+      "id": "shotgun",
+      "file": "shotgun.glb",
+      "label": "Shotgun"
+    },
+    {
+      "id": "sniper",
+      "file": "sniper.glb",
+      "label": "Sniper Rifle"
+    },
+    {
+      "id": "pistol",
+      "file": "pistol.glb",
+      "label": "Pistol"
+    }
+  ]
+}

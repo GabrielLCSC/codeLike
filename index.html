@@ -572,6 +572,24 @@
         <div id="editor-tool-list" class="editor-tool-list"></div>
       </section>
       <section class="editor-section">
+        <h3 class="editor-section-title">SETTINGS</h3>
+        <div class="editor-size-row">
+          <label class="editor-field">
+            <span>W</span>
+            <input type="number" id="editor-map-width" min="16" max="80" value="44">
+          </label>
+          <label class="editor-field">
+            <span>H</span>
+            <input type="number" id="editor-map-height" min="16" max="80" value="44">
+          </label>
+          <button type="button" class="editor-action-btn" id="editor-btn-apply-size">Apply</button>
+        </div>
+        <div class="editor-time-row">
+          <button type="button" class="editor-tool-btn active" id="editor-btn-day">Day</button>
+          <button type="button" class="editor-tool-btn" id="editor-btn-night">Night</button>
+        </div>
+      </section>
+      <section class="editor-section">
         <h3 class="editor-section-title">MAP</h3>
         <div class="editor-actions">
           <button type="button" class="editor-action-btn" id="editor-btn-new">New</button>
@@ -581,7 +599,7 @@
       </section>
       <p id="editor-status" class="editor-status">Ready</p>
       <footer class="editor-panel-footer">
-        <p class="editor-hint">WASD pan · Scroll zoom · Right-drag orbit · Shift+click erase</p>
+        <p class="editor-hint">ZQSD pan · R/E zoom · Scroll zoom · Right-drag orbit · Shift+click erase</p>
         <button type="button" class="editor-action-btn editor-action-btn--danger" id="editor-btn-exit">Exit to Menu</button>
       </footer>
     </div>

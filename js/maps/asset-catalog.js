@@ -2,6 +2,8 @@
 //  WARFRONT — Map editor asset definitions (procedural + models)
 // ═══════════════════════════════════════════════════════════
 
+import { getModelCatalog } from './model-loader.js';
+
 /**
  * @typedef {object} AssetToolDef
  * @property {string} id
@@ -34,6 +36,34 @@ export const PROCEDURAL_ASSETS = [
 
 const PROCEDURAL_BY_ID = new Map(PROCEDURAL_ASSETS.map(a => [a.id, a]));
 
+/** @param {import('./model-loader.js').MapModelEntry} entry */
+function toolDefFromCatalogEntry(entry) {
+  return {
+    id:        `model:${entry.id}`,
+    label:     entry.label ?? entry.id,
+    blocks:    entry.blocks ?? true,
+    gridKind:  entry.gridKind ?? 'cover',
+    footprint: entry.footprint ?? [1, 1],
+    category:  'models',
+    modelId:   entry.id,
+    yOffset:   entry.yOffset ?? 0,
+  };
+}
+
+/** @param {import('./map-schema.js').MapAsset} asset */
+function toolDefFromStoredModelAsset(asset) {
+  return {
+    id:        `model:${asset.modelId}`,
+    label:     asset.modelId,
+    blocks:    asset.blocks ?? true,
+    gridKind:  asset.gridKind ?? 'cover',
+    footprint: asset.footprint ?? [1, 1],
+    category:  'models',
+    modelId:   asset.modelId,
+    yOffset:   asset.yOffset ?? 0,
+  };
+}
+
 /** @type {AssetToolDef[]} */
 let _modelTools = [];
 
@@ -62,7 +92,14 @@ export function getEditorAssetTools() {
  */
 export function getAssetDef(asset) {
   if (asset.type === 'model' && asset.modelId) {
-    return _modelTools.find(t => t.modelId === asset.modelId) ?? null;
+    const fromTools = _modelTools.find(t => t.modelId === asset.modelId);
+    if (fromTools) return fromTools;
+    const fromCatalog = getModelCatalog().find(m => m.id === asset.modelId);
+    if (fromCatalog) return toolDefFromCatalogEntry(fromCatalog);
+    if (asset.blocks !== undefined || asset.footprint || asset.gridKind) {
+      return toolDefFromStoredModelAsset(asset);
+    }
+    return null;
   }
   return PROCEDURAL_BY_ID.get(asset.type) ?? null;
 }
@@ -73,11 +110,11 @@ export function getAssetDef(asset) {
  */
 export function getToolDefForType(type, modelId) {
   if (type === 'model' && modelId) {
-    return _modelTools.find(t => t.modelId === modelId) ?? null;
+    return getAssetDef({ type: 'model', modelId, id: '_', gx: 0, gz: 0, x: 0, y: 0, z: 0 });
   }
   if (type.startsWith('model:')) {
     const id = type.slice(6);
-    return _modelTools.find(t => t.modelId === id) ?? null;
+    return getAssetDef({ type: 'model', modelId: id, id: '_', gx: 0, gz: 0, x: 0, y: 0, z: 0 });
   }
   return PROCEDURAL_BY_ID.get(type) ?? null;
 }
@@ -101,7 +138,7 @@ export function orientedFootprint(footprint, rotY = 0) {
  */
 export function assetFootprintCells(asset) {
   const def = getAssetDef(asset);
-  const [w, h] = orientedFootprint(def?.footprint, asset.rotY ?? 0);
+  const [w, h] = orientedFootprint(def?.footprint ?? asset.footprint, asset.rotY ?? 0);
   const cells = [];
   for (let dx = 0; dx < w; dx++) {
     for (let dz = 0; dz < h; dz++) {

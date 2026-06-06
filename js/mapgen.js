@@ -8,8 +8,12 @@ import { MAP_W, MAP_H, CELL_SIZE, WALL_HEIGHT } from './config.js';
 import { createMapGrid, getMapGameplay, DEFAULT_MAP_ID } from './maps/index.js';
 import { buildTriLaneScene } from './maps/tri-lane-scene.js';
 import { buildCustomMapScene } from './maps/custom-map-scene.js';
-import { mapDataToGameplay } from './maps/map-schema.js';
+import { mapDataToGameplay, CUSTOM_MAP_BORDER_CELLS } from './maps/map-schema.js';
 import { registerCustomMap } from './maps/index.js';
+import { resolveMapTheme } from './maps/map-theme.js';
+import { CollisionWorld } from './collision/collision-world.js';
+import { bakeWalkGridFromCollision } from './collision/bake-walk-grid.js';
+import { buildCustomMapColliderRoot } from './collision/asset-colliders.js';
 
 const CS = CELL_SIZE;
 const WH = WALL_HEIGHT;
@@ -36,6 +40,10 @@ export class MapGenerator {
     this.staticMeshes = [];
     /** @type {import('./maps/index.js').MapGameplay|null} */
     this.gameplay = null;
+    /** @type {import('./collision/collision-world.js').CollisionWorld|null} */
+    this.collisionWorld = null;
+    /** @type {THREE.Group|null} */
+    this._colliderRoot = null;
     this.lodibidonCenter = { x: 0, z: 0 };
     this.lodibidonSpawns = { alpha: [], omega: [] };
   }
@@ -81,15 +89,72 @@ export class MapGenerator {
     return this.mapGrid.buildMinimapImageData();
   }
 
-  buildScene(scene) {
+  buildScene(scene, opts = {}) {
     const mergeFn = (s, batches, M) => this._mergeBatches(s, batches, M);
     if (this.gameplay.meta?.scene === 'custom') {
-      buildCustomMapScene(scene, this.gameplay, mergeFn);
+      buildCustomMapScene(scene, this.gameplay, mergeFn, {
+        skipPlacedAssets: !!opts.editorMode,
+      });
     } else {
       buildTriLaneScene(scene, this.gameplay, mergeFn);
     }
     this._buildAmmoChests(scene);
     this._buildLighting(scene);
+  }
+
+  /**
+   * Build mesh colliders + rebake walk grid for custom maps (Blender COL assets).
+   * Call after buildScene. Built-in tri-lane maps keep grid-only collision.
+   * @param {THREE.Scene} scene
+   * @param {{ editorAssets?: import('./maps/map-schema.js').MapAsset[] }} [opts]
+   */
+  finalizeMeshCollision(scene, opts = {}) {
+    this._clearColliderRoot(scene);
+
+    const isCustom = this.gameplay?.meta?.scene === 'custom';
+    if (!isCustom) {
+      this.collisionWorld = new CollisionWorld();
+      return;
+    }
+
+    const assets = opts.editorAssets ?? this.gameplay.customAssets ?? [];
+    this._colliderRoot = buildCustomMapColliderRoot(
+      assets,
+      { width: this.width, height: this.height },
+      CS,
+      CUSTOM_MAP_BORDER_CELLS,
+    );
+    scene.add(this._colliderRoot);
+
+    this.collisionWorld = new CollisionWorld();
+    this.collisionWorld.addRoot(this._colliderRoot);
+
+    this._colliderRoot.traverse(c => {
+      if (c.isMesh && c.userData.isMeshCollider) {
+        this.staticMeshes.push(c);
+      }
+    });
+
+    this.mapGrid = bakeWalkGridFromCollision(
+      this.collisionWorld,
+      this.width,
+      this.height,
+      { blockPerimeter: false },
+    );
+    this.grid = this.mapGrid.grid;
+  }
+
+  _clearColliderRoot(scene) {
+    if (!this._colliderRoot) return;
+    scene.remove(this._colliderRoot);
+    this._colliderRoot.traverse(c => {
+      if (c.isMesh) {
+        const idx = this.staticMeshes.indexOf(c);
+        if (idx >= 0) this.staticMeshes.splice(idx, 1);
+      }
+    });
+    this._colliderRoot = null;
+    this.collisionWorld = null;
   }
 
   _mergeBatches(scene, batches, M) {
@@ -104,6 +169,7 @@ export class MapGenerator {
       const mesh = new THREE.Mesh(merged, M[key]);
       mesh.receiveShadow = (key !== 'stripe');
       mesh.castShadow    = castKeys.has(key);
+      mesh.userData.mapGenerated = true;
       scene.add(mesh);
       this.staticMeshes.push(mesh);
       if (castKeys.has(key)) this.wallMeshes.push(mesh);
@@ -142,43 +208,87 @@ export class MapGenerator {
       mark.position.set(0, 0.58, 0.50);
       g.add(mark);
 
+      g.userData.mapGenerated = true;
       scene.add(g);
     }
   }
 
   _buildLighting(scene) {
-    const theme = this.gameplay?.theme ?? {};
+    const isCustom = this.gameplay?.meta?.scene === 'custom';
+    if (isCustom) {
+      const theme = resolveMapTheme({ theme: this.gameplay.theme });
+      const amb = new THREE.AmbientLight(theme.ambientColor, theme.ambientInt);
+      amb.userData.mapGenerated = true;
+      scene.add(amb);
+
+      const sun = new THREE.DirectionalLight(theme.sunColor, theme.sunInt);
+      sun.position.set(...theme.sunPos);
+      sun.userData.mapGenerated = true;
+      scene.add(sun);
+
+      const hemi = new THREE.HemisphereLight(theme.hemiSky, theme.hemiGround, theme.hemiInt);
+      hemi.userData.mapGenerated = true;
+      scene.add(hemi);
+
+      const cx = this.lodibidonCenter?.x ?? (this.width * CS * 0.5);
+      const cz = this.lodibidonCenter?.z ?? (this.height * CS * 0.5);
+      const midLight = new THREE.PointLight(theme.midLightColor, theme.midLightInt, 48);
+      midLight.position.set(cx, WH + 2, cz);
+      midLight.userData.mapGenerated = true;
+      scene.add(midLight);
+      return;
+    }
+
     const prof  = this.gameplay?.sceneProfile ?? {};
     const warm  = prof.midSpace === 'exterior';
 
-    scene.add(new THREE.AmbientLight(warm ? 0xc8c0b0 : 0xb8c8dc, warm ? 1.05 : 0.95));
+    const amb = new THREE.AmbientLight(warm ? 0xc8c0b0 : 0xb8c8dc, warm ? 1.05 : 0.95);
+    amb.userData.mapGenerated = true;
+    scene.add(amb);
 
     const sunColor = warm ? 0xffe8c8 : 0xfff0dd;
     const sun = new THREE.DirectionalLight(sunColor, warm ? 1.4 : 1.25);
     sun.position.set(40, 60, 20);
+    sun.userData.mapGenerated = true;
     scene.add(sun);
 
     const hemiTop = warm ? 0xc8b898 : 0x8caabb;
-    scene.add(new THREE.HemisphereLight(hemiTop, 0x4a5538, warm ? 0.72 : 0.62));
+    const hemi = new THREE.HemisphereLight(hemiTop, 0x4a5538, warm ? 0.72 : 0.62);
+    hemi.userData.mapGenerated = true;
+    scene.add(hemi);
 
     const cx = this.lodibidonCenter?.x ?? (MAP_W * CS * 0.5);
     const cz = this.lodibidonCenter?.z ?? (MAP_H * CS * 0.5);
     const midLight = new THREE.PointLight(warm ? 0xffaa66 : 0xff9933, warm ? 2.8 : 2.4, 32);
     midLight.position.set(cx, WH - 0.55, cz);
+    midLight.userData.mapGenerated = true;
     scene.add(midLight);
 
     if (warm) {
       const fill = new THREE.DirectionalLight(0x8899bb, 0.35);
       fill.position.set(-30, 40, -20);
+      fill.userData.mapGenerated = true;
       scene.add(fill);
     }
   }
 
   isWall(worldX, worldZ) {
+    if (this.collisionWorld?.active) {
+      return this.collisionWorld.isBlocked(worldX, worldZ);
+    }
     return this.mapGrid.isWall(worldX, worldZ);
   }
 
   isWallThin(worldX, worldZ) {
+    if (this.collisionWorld?.active) {
+      const r = 0.28;
+      return [
+        [worldX + r, worldZ],
+        [worldX - r, worldZ],
+        [worldX, worldZ + r],
+        [worldX, worldZ - r],
+      ].some(([x, z]) => this.collisionWorld.isBlocked(x, z, r));
+    }
     const r = 0.28;
     return [
       [worldX + r, worldZ],
@@ -189,6 +299,9 @@ export class MapGenerator {
   }
 
   hasLOS(x1, z1, x2, z2) {
+    if (this.collisionWorld?.active) {
+      return this.collisionWorld.hasLOS(x1, z1, x2, z2);
+    }
     return this.mapGrid.hasLOS(x1, z1, x2, z2);
   }
 

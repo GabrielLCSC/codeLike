@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import * as THREE from 'three';
+import { buildWeaponHeldModel } from './weapons/gun-parts.js';
 
 // ─── TEAM PALETTES ───────────────────────────────────────────
 const TEAMS = {
@@ -108,8 +109,14 @@ function makeMats(teamKey) {
   };
 }
 
-/** Compact assault-rifle prop attached to the right hand. */
-function buildHeldWeapon(parent, mats) {
+/** Weapon prop attached to the right hand (GLB or procedural fallback). */
+function buildHeldWeapon(parent, mats, weaponKey = 'assault_rifle') {
+  const glb = buildWeaponHeldModel(weaponKey);
+  if (glb) {
+    parent.add(glb);
+    return glb;
+  }
+
   const g = new THREE.Group();
   g.position.set(0.06, -0.04, 0.14);
   g.rotation.set(-0.55, 0.05, 0);

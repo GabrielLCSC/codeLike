@@ -10,6 +10,10 @@ import {
   slugifyMapId,
   validateMapData,
   getToolDefForType,
+  promptMapDimensions,
+  clampMapSize,
+  MIN_MAP_CELLS,
+  MAX_MAP_CELLS,
 } from './map-schema.js';
 import {
   getEditorAssetTools,
@@ -18,11 +22,12 @@ import {
   parseToolSelection,
   setModelTools,
 } from './asset-catalog.js';
-import { initMapModels } from './model-loader.js';
+import { reloadMapModels } from './model-loader.js';
 import { saveMapToFirebase, loadMapFromFirebase, listMapsFromFirebase } from './map-storage.js';
 import { registerCustomMap } from './index.js';
 import { buildSpawnMarkers } from './custom-map-scene.js';
 import { buildMapAssetObject } from './editor-meshes.js';
+import { applySceneTheme, rebuildEditorLighting, resolveMapTheme } from './map-theme.js';
 
 /**
  * @param {import('../game.js').Game} game
@@ -59,12 +64,18 @@ export class MapEditor {
     this._overlayOnly = false;
   }
 
-  /** @param {{ overlayOnly?: boolean }} [options] */
+  /** @param {{ overlayOnly?: boolean, mapData?: import('./map-schema.js').CustomMapData }} [options] @returns {Promise<boolean>} */
   async enter(options = {}) {
-    if (this.active) return;
+    if (this.active) return true;
     const game = this.game;
     this.active = true;
     this._overlayOnly = !!options.overlayOnly;
+
+    if (options.mapData) {
+      this.mapData = structuredClone(options.mapData);
+      this._assetIdCounter = this.mapData.assets.length;
+    }
+    if (!this.mapData.theme) this.mapData.theme = { timeOfDay: 'day' };
 
     await this._ensureModelsLoaded();
 
@@ -80,14 +91,27 @@ export class MapEditor {
     this._showSidebar(true);
     this._bindEditorDom();
     this._bindEditorInput();
+
     if (this._overlayOnly) {
       this._ensureGridOverlay();
       this._syncAssetMeshes();
+      this._applyTheme();
     } else {
-      this._rebuildSceneFromData();
+      this._ensureEditorScene();
+      this._regenerateTerrain({ resetPan: true });
     }
+
+    this._syncMapSettingsUi();
     this._updateFlyCamera();
-    this._setStatus('Editor — click place · Shift erase · Right-drag orbit · ` toggle');
+    this._setStatus('Editor — ZQSD pan · Shift erase · Right-drag orbit · ` toggle');
+    return true;
+  }
+
+  /** Prompt for map size and return fresh map data, or null if cancelled. */
+  static promptNewMapData() {
+    const dims = promptMapDimensions();
+    if (!dims) return null;
+    return createEmptyMapData({ meta: dims });
   }
 
   /** Exit editor — restore gameplay camera if available. */
@@ -112,11 +136,23 @@ export class MapEditor {
   }
 
   /** @param {import('./map-schema.js').CustomMapData} data */
-  loadMapData(data) {
+  async loadMapData(data) {
     validateMapData(data);
     this.mapData = structuredClone(data);
+    if (!this.mapData.theme) this.mapData.theme = { timeOfDay: 'day' };
     this._assetIdCounter = this.mapData.assets.length;
-    this._rebuildSceneFromData();
+
+    await this._ensureModelsLoaded();
+    this._ensureEditorScene();
+
+    if (this._overlayOnly) {
+      this._syncAssetMeshes();
+      this._applyTheme();
+    } else {
+      this._regenerateTerrain({ resetPan: true });
+    }
+    this._syncMapSettingsUi();
+    this._updateFlyCamera();
     this._setStatus(`Loaded "${data.meta.name}"`);
   }
 
@@ -158,21 +194,170 @@ export class MapEditor {
       if (!pick?.trim()) return;
       const id = pick.trim().split('—')[0].trim();
       const data = await loadMapFromFirebase(id);
-      registerCustomMap(data);
-      this.loadMapData(data);
+      await this.loadMapData(data);
     } catch (err) {
       this._setStatus(err.message ?? 'Load failed', true);
     }
   }
 
   newMap() {
-    this.mapData = createEmptyMapData();
+    const data = MapEditor.promptNewMapData();
+    if (!data) return;
+    this.mapData = data;
     this._assetIdCounter = 0;
-    this._rebuildSceneFromData();
-    this._setStatus('New blank map');
+    if (this._overlayOnly) {
+      this._syncAssetMeshes();
+      this._applyTheme();
+      this._syncMapSettingsUi();
+    } else {
+      this._regenerateTerrain({ resetPan: true });
+    }
+    this._setStatus(`New ${this.mapData.meta.width}×${this.mapData.meta.height} map`);
   }
 
-  // ── Scene rebuild ─────────────────────────────────────────
+  _disposeObject3D(obj) {
+    obj.traverse(c => {
+      if (c.isMesh) {
+        c.geometry?.dispose();
+        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+        else c.material?.dispose();
+      }
+    });
+  }
+
+  _ensureEditorScene() {
+    const game = this.game;
+    if (!game.renderer) game._initRenderer();
+    if (!game.scene) {
+      game._initScene();
+      if (game.camera) game.scene.add(game.camera);
+      this._assetRoot = null;
+      this._gridHelper = null;
+      this._spawnMarkers = null;
+      this._clearPreview();
+    }
+    if (!game.map) game.map = new MapGenerator();
+  }
+
+  _removeMapGeneratedMeshes() {
+    const game = this.game;
+    if (!game.scene) return;
+    const toRemove = game.scene.children.filter(
+      c => c.userData?.mapGenerated || c.userData?.customMapAsset,
+    );
+    for (const obj of toRemove) {
+      game.scene.remove(obj);
+      this._disposeObject3D(obj);
+    }
+    if (game.map) {
+      game.map.staticMeshes = [];
+      game.map.wallMeshes = [];
+    }
+  }
+
+  _regenerateTerrain({ resetPan = false } = {}) {
+    const game = this.game;
+    this._ensureEditorScene();
+    if (!game.map || !game.scene) {
+      throw new Error('Editor scene is not ready.');
+    }
+    const savedPan = this._panTarget.clone();
+    const savedOrbit = { ...this._orbit };
+
+    this._removeMapGeneratedMeshes();
+    registerCustomMap(this.mapData);
+    game.map.generateFromEditorData(this.mapData);
+    game.map.buildScene(game.scene, { editorMode: true });
+    game.map.finalizeMeshCollision(game.scene, { editorAssets: this.mapData.assets });
+    this._rebuildSceneFromData({ resetPan });
+    if (!resetPan) {
+      this._panTarget.copy(savedPan);
+      Object.assign(this._orbit, savedOrbit);
+    }
+    this._applyTheme();
+    this._syncMapSettingsUi();
+  }
+
+  _applyTheme() {
+    const game = this.game;
+    if (!game.scene) return;
+    const theme = resolveMapTheme(this.mapData);
+    applySceneTheme(game.scene, theme);
+
+    const w = this.mapData.meta.width ?? MAP_W;
+    const h = this.mapData.meta.height ?? MAP_H;
+    const center = { x: w * CELL_SIZE * 0.5, z: h * CELL_SIZE * 0.5 };
+
+    if (this._overlayOnly) {
+      rebuildEditorLighting(game.scene, theme, center);
+    } else {
+      game.scene.traverse(c => {
+        if (c.isAmbientLight && c.userData?.mapGenerated) {
+          c.color.setHex(theme.ambientColor);
+          c.intensity = theme.ambientInt;
+        }
+        if (c.isDirectionalLight && c.userData?.mapGenerated) {
+          c.color.setHex(theme.sunColor);
+          c.intensity = theme.sunInt;
+          c.position.set(...theme.sunPos);
+        }
+        if (c.isHemisphereLight && c.userData?.mapGenerated) {
+          c.color.setHex(theme.hemiSky);
+          c.groundColor.setHex(theme.hemiGround);
+          c.intensity = theme.hemiInt;
+        }
+        if (c.isPointLight && c.userData?.mapGenerated) {
+          c.color.setHex(theme.midLightColor);
+          c.intensity = theme.midLightInt;
+          c.position.set(center.x, 6, center.z);
+        }
+      });
+    }
+  }
+
+  toggleDayNight() {
+    const next = this.mapData.theme?.timeOfDay === 'night' ? 'day' : 'night';
+    this.mapData.theme = { ...this.mapData.theme, timeOfDay: next };
+    this._applyTheme();
+    this._syncMapSettingsUi();
+    this._setStatus(next === 'night' ? 'Night mode' : 'Day mode');
+  }
+
+  applyMapSizeFromUi() {
+    if (this._overlayOnly) {
+      this._setStatus('Resize in Map Editor mode only', true);
+      return;
+    }
+    const wEl = document.getElementById('editor-map-width');
+    const hEl = document.getElementById('editor-map-height');
+    if (!wEl || !hEl) return;
+    const width = clampMapSize(wEl.value, this.mapData.meta.width ?? MAP_W);
+    const height = clampMapSize(hEl.value, this.mapData.meta.height ?? MAP_H);
+    if (width === this.mapData.meta.width && height === this.mapData.meta.height) return;
+
+    this.mapData.meta.width = width;
+    this.mapData.meta.height = height;
+    this.mapData.openRects = [{
+      x: 0, z: 0, w: width, h: height, kind: 'floor',
+    }];
+    this.mapData.assets = this.mapData.assets.filter(a =>
+      assetFootprintCells(a).every(([gx, gz]) => gx >= 0 && gz >= 0 && gx < width && gz < height),
+    );
+    this._regenerateTerrain({ resetPan: true });
+    this._setStatus(`Map resized to ${width}×${height}`);
+  }
+
+  _syncMapSettingsUi() {
+    const wEl = document.getElementById('editor-map-width');
+    const hEl = document.getElementById('editor-map-height');
+    const dayBtn = document.getElementById('editor-btn-day');
+    const nightBtn = document.getElementById('editor-btn-night');
+    if (wEl) wEl.value = String(this.mapData.meta.width ?? MAP_W);
+    if (hEl) hEl.value = String(this.mapData.meta.height ?? MAP_H);
+    const isNight = this.mapData.theme?.timeOfDay === 'night';
+    dayBtn?.classList.toggle('active', !isNight);
+    nightBtn?.classList.toggle('active', isNight);
+  }
 
   _ensureGridOverlay() {
     const game = this.game;
@@ -182,7 +367,6 @@ export class MapEditor {
     this._gridHelper = new THREE.GridHelper(w * CELL_SIZE, w, 0x00ff88, 0x334455);
     this._gridHelper.position.set(w * CELL_SIZE * 0.5, 0.02, h * CELL_SIZE * 0.5);
     game.scene.add(this._gridHelper);
-    this._panTarget.set(w * CELL_SIZE * 0.5, 0, h * CELL_SIZE * 0.5);
   }
 
   _syncAssetMeshes() {
@@ -194,8 +378,7 @@ export class MapEditor {
     while (this._assetRoot.children.length) {
       const c = this._assetRoot.children[0];
       this._assetRoot.remove(c);
-      c.geometry?.dispose();
-      if (c.material) c.material.dispose();
+      this._disposeObject3D(c);
     }
     for (const a of this.mapData.assets) {
       const mesh = this._buildAssetMesh(a);
@@ -203,21 +386,16 @@ export class MapEditor {
     }
     if (this._spawnMarkers) this.game.scene.remove(this._spawnMarkers);
     this._spawnMarkers = buildSpawnMarkers(this.game.scene, this.mapData.assets);
+    this.game.map.finalizeMeshCollision(this.game.scene, { editorAssets: this.mapData.assets });
   }
 
-  _rebuildSceneFromData() {
+  _rebuildSceneFromData({ resetPan = false } = {}) {
     const game = this.game;
     if (!game.scene) return;
 
     if (this._assetRoot) {
       game.scene.remove(this._assetRoot);
-      this._assetRoot.traverse(c => {
-        if (c.isMesh) {
-          c.geometry?.dispose();
-          if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-          else c.material?.dispose();
-        }
-      });
+      this._disposeObject3D(this._assetRoot);
     }
     if (this._spawnMarkers) {
       game.scene.remove(this._spawnMarkers);
@@ -225,6 +403,7 @@ export class MapEditor {
     }
     if (this._gridHelper) {
       game.scene.remove(this._gridHelper);
+      this._gridHelper = null;
     }
 
     const w = this.mapData.meta.width ?? MAP_W;
@@ -249,7 +428,9 @@ export class MapEditor {
 
     this._spawnMarkers = buildSpawnMarkers(game.scene, this.mapData.assets);
 
-    this._panTarget.set(w * CELL_SIZE * 0.5, 0, h * CELL_SIZE * 0.5);
+    if (resetPan) {
+      this._panTarget.set(w * CELL_SIZE * 0.5, 0, h * CELL_SIZE * 0.5);
+    }
   }
 
   /** @param {import('./map-schema.js').MapAsset} asset */
@@ -283,7 +464,7 @@ export class MapEditor {
   }
 
   async _ensureModelsLoaded() {
-    const models = await initMapModels();
+    const models = await reloadMapModels();
     setModelTools(models);
     this._refreshToolList();
   }
@@ -336,8 +517,7 @@ export class MapEditor {
       const existing = this._assetAtCell(snap.gx, snap.gz);
       if (existing) {
         this.mapData.assets = this.mapData.assets.filter(a => a.id !== existing.id);
-        if (this._overlayOnly) this._syncAssetMeshes();
-        else this._rebuildSceneFromData();
+        this._syncAssetMeshes();
       }
       return;
     }
@@ -361,10 +541,15 @@ export class MapEditor {
       gx: snap.gx,
       gz: snap.gz,
     };
-    if (modelId) asset.modelId = modelId;
+    if (modelId) {
+      asset.modelId = modelId;
+      asset.blocks = toolDef.blocks;
+      asset.gridKind = toolDef.gridKind ?? 'cover';
+      asset.footprint = [...(toolDef.footprint ?? [1, 1])];
+      if (toolDef.yOffset) asset.yOffset = toolDef.yOffset;
+    }
     this.mapData.assets.push(asset);
-    if (this._overlayOnly) this._syncAssetMeshes();
-    else this._rebuildSceneFromData();
+    this._syncAssetMeshes();
   }
 
   // ── Fly camera ────────────────────────────────────────────
@@ -372,25 +557,25 @@ export class MapEditor {
   _updateFlyCameraMovement(delta) {
     const spd = 18 * delta;
     const fwd = new THREE.Vector3(
-      Math.sin(this._orbit.yaw),
+      -Math.sin(this._orbit.yaw),
       0,
-      Math.cos(this._orbit.yaw),
+      -Math.cos(this._orbit.yaw),
     );
     const rgt = new THREE.Vector3(fwd.z, 0, -fwd.x);
 
-    if (this._keys.has('KeyW') || this._keys.has('ArrowUp')) {
+    if (this._keys.has('KeyZ') || this._keys.has('KeyW') || this._keys.has('ArrowUp')) {
       this._panTarget.addScaledVector(fwd, spd);
     }
     if (this._keys.has('KeyS') || this._keys.has('ArrowDown')) {
       this._panTarget.addScaledVector(fwd, -spd);
     }
-    if (this._keys.has('KeyA') || this._keys.has('ArrowLeft')) {
+    if (this._keys.has('KeyQ') || this._keys.has('KeyA') || this._keys.has('ArrowLeft')) {
       this._panTarget.addScaledVector(rgt, -spd);
     }
     if (this._keys.has('KeyD') || this._keys.has('ArrowRight')) {
       this._panTarget.addScaledVector(rgt, spd);
     }
-    if (this._keys.has('KeyQ')) this._orbit.dist = Math.max(8, this._orbit.dist - spd * 1.2);
+    if (this._keys.has('KeyR')) this._orbit.dist = Math.max(8, this._orbit.dist - spd * 1.2);
     if (this._keys.has('KeyE')) this._orbit.dist = Math.min(90, this._orbit.dist + spd * 1.2);
   }
 
@@ -548,6 +733,27 @@ export class MapEditor {
     bind('editor-btn-load', () => this.loadMapPrompt());
     bind('editor-btn-new', () => this.newMap());
     bind('editor-btn-exit', () => this.game.exitEditorToMenu());
+    bind('editor-btn-day', () => {
+      if (this.mapData.theme?.timeOfDay !== 'day') this.toggleDayNight();
+    });
+    bind('editor-btn-night', () => {
+      if (this.mapData.theme?.timeOfDay === 'night') return;
+      this.toggleDayNight();
+    });
+    bind('editor-btn-apply-size', () => this.applyMapSizeFromUi());
+
+    const wEl = document.getElementById('editor-map-width');
+    const hEl = document.getElementById('editor-map-height');
+    if (wEl && !wEl.dataset.bound) {
+      wEl.dataset.bound = '1';
+      wEl.min = String(MIN_MAP_CELLS);
+      wEl.max = String(MAX_MAP_CELLS);
+    }
+    if (hEl && !hEl.dataset.bound) {
+      hEl.dataset.bound = '1';
+      hEl.min = String(MIN_MAP_CELLS);
+      hEl.max = String(MAX_MAP_CELLS);
+    }
   }
 
   _setStatus(msg, isError = false) {

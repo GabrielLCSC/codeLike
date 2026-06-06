@@ -10,25 +10,16 @@
 import * as THREE  from 'three';
 import { WEAPONS, SIDE_WEAPON_KEY, DROPPABLE_WEAPONS } from './config.js';
 import { sound }   from './sound.js';
-import { assembleWeaponParts, weaponMaterials, buildWeaponWorldModel } from './weapons/gun-parts.js';
+import { buildWeaponViewModel, getWeaponMuzzleOffset } from './weapons/gun-parts.js';
 export { buildWeaponWorldModel } from './weapons/gun-parts.js';
-
-// Muzzle flash position (bore axis) for each weapon, in group-local space
-const FLASH_OFFSET = {
-  assault_rifle: new THREE.Vector3(0,  0.036, -0.356),
-  ak47:          new THREE.Vector3(0,  0.030, -0.368),
-  shotgun:       new THREE.Vector3(0,  0.018, -0.331),
-  sniper:        new THREE.Vector3(0,  0.032, -0.473),
-  pistol:        new THREE.Vector3(0,  0.022, -0.128),
-};
 
 const THROW_DURATION = 0.42;
 
 // Rest position of the weapon group in camera space (combat — crosshair unchanged)
-const REST_POS = new THREE.Vector3(0.22, -0.28, -0.46);
+const REST_POS = new THREE.Vector3(0.32, -0.78, -0.70);
 
 // Tactical sprint: high-ready on the right, barrel up (viewmodel only)
-const SPRINT_POS = new THREE.Vector3(0.36, -0.04, -0.34);
+const SPRINT_POS = new THREE.Vector3(0.36, -0.34, -0.34);
 const SPRINT_ROT = { x: 1.28, y: 0.08, z: 0.28 };
 
 export class WeaponSystem {
@@ -613,16 +604,14 @@ export class WeaponSystem {
       this.group = null;
     }
 
-    const wDef = WEAPONS[key];
-    const MATS = weaponMaterials(key);
-    const group = assembleWeaponParts(key, MATS);
+    const group = buildWeaponViewModel(key);
+    const modelRoot = group.children[0] ?? group;
 
-    // Muzzle flash positioned at the bore axis tip for this weapon
-    const flashPos = FLASH_OFFSET[key] ?? FLASH_OFFSET.assault_rifle;
+    const flashPos = getWeaponMuzzleOffset(key);
     this._flash = this._buildMuzzleFlash(key);
     this._flash.position.copy(flashPos);
     this._flash.visible = false;
-    group.add(this._flash);
+    modelRoot.add(this._flash);
 
     group.position.copy(REST_POS);
     group.visible = !this._viewSuppressed;

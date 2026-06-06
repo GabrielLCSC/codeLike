@@ -4,6 +4,19 @@
 
 import * as THREE from 'three';
 import { WEAPONS } from '../config.js';
+import {
+  cloneWeaponViewModel,
+  cloneWeaponWorldModel,
+  cloneWeaponHeldModel,
+} from './weapon-model-loader.js';
+
+export {
+  initWeaponModels,
+  reloadWeaponModels,
+  hasWeaponModel,
+  getWeaponMuzzleOffset,
+  getWeaponModelCatalog,
+} from './weapon-model-loader.js';
 
 // ── Weapon part tables ───────────────────────────────────────
 // Each entry: [shape, matKey, params, [x,y,z], [rx,ry,rz]?]
@@ -256,8 +269,17 @@ export function assembleWeaponParts(key, mats) {
   return group;
 }
 
-/** Same gun geometry as the first-person viewmodel, oriented flat for ground pickups. */
+/** First-person viewmodel — GLB if loaded, else procedural. */
+export function buildWeaponViewModel(key) {
+  const glb = cloneWeaponViewModel(key);
+  if (glb) return glb;
+  return assembleWeaponParts(key, weaponMaterials(key));
+}
+
+/** Ground pickup orientation — GLB if loaded, else procedural. */
 export function buildWeaponWorldModel(key) {
+  const glb = cloneWeaponWorldModel(key);
+  if (glb) return glb;
   const gun = assembleWeaponParts(key, weaponMaterials(key));
   const root = new THREE.Group();
   gun.rotation.order = 'YXZ';
@@ -268,4 +290,9 @@ export function buildWeaponWorldModel(key) {
   const box = new THREE.Box3().setFromObject(gun);
   gun.position.y = -box.min.y + 0.04;
   return root;
+}
+
+/** Third-person held prop — GLB if loaded, else null (caller uses procedural). */
+export function buildWeaponHeldModel(key) {
+  return cloneWeaponHeldModel(key);
 }

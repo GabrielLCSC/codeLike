@@ -1,3 +1,53 @@
 {
-  "models": []
+  "models": [
+    {
+      "file": "boxito.glb",
+      "label": "Boxito",
+      "scale": 0.5,
+      "blocks": true,
+      "gridKind": "cover",
+      "footprint": [3, 1],
+      "useMeshCollider": true
+    },
+    {
+      "file": "brickBlock.glb",
+      "label": "Brick Block",
+      "scale": 1,
+      "blocks": true,
+      "gridKind": "cover",
+      "useMeshCollider": true
+    },
+    {
+      "file": "maison.glb",
+      "label": "Maison",
+      "scale": 1,
+      "blocks": true,
+      "gridKind": "cover",
+      "useMeshCollider": true
+    },
+    {
+      "file": "maison1.glb",
+      "label": "Maison 1",
+      "scale": 1,
+      "blocks": true,
+      "gridKind": "cover",
+      "useMeshCollider": true
+    },
+    {
+      "file": "maison2.glb",
+      "label": "Maison 2",
+      "scale": 1,
+      "blocks": true,
+      "gridKind": "cover",
+      "useMeshCollider": true
+    },
+    {
+      "file": "maison3.glb",
+      "label": "Maison 3",
+      "scale": 1,
+      "blocks": true,
+      "gridKind": "cover",
+      "useMeshCollider": true
+    }
+  ]
 }

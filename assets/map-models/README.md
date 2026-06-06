@@ -30,7 +30,16 @@ Register each model in `manifest.json`:
 | `yOffset` | Lift model above ground if needed |
 | `blocks` | Whether players collide with it (default `true`) |
 | `gridKind` | Collision type: `cover`, `wall`, or `pillar` |
-| `footprint` | Grid cells occupied `[width, depth]`, e.g. `[2, 1]` |
+| `footprint` | Grid cells occupied `[width, depth]`, e.g. `[2, 2]` for a ~4.4 m box (each cell = 2.2 m) |
+
+**Collision notes**
+
+- Collision is **grid-based**, not mesh-accurate — the GLB mesh is visual only.
+- Each grid cell is **2.2 m** wide/deep. Set `footprint` to cover the prop’s ground area (e.g. a 3 m wide crate → `[2, 1]` or `[2, 2]`).
+- `"blocks": true` enables collision; `"blocks": false` for decorative props (like lamps).
+- `"gridKind": "wall"` or `"pillar"` for full-height blockers; `"cover"` for low cover.
+- **Map editor fly mode has no player collision** — save the map, pick it in the main menu, then play Solo to test walking into props.
+- After editing `manifest.json`, reload the page. Re-save maps so placed props store updated collision data.
 
 **Tips**
 

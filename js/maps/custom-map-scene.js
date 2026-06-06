@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { CELL_SIZE, WALL_HEIGHT } from '../config.js';
 import { CUSTOM_MAP_BORDER_CELLS } from './map-schema.js';
 import { buildMapAssetObject, ASSET_COLORS } from './editor-meshes.js';
+import { applySceneTheme, resolveMapTheme } from './map-theme.js';
 
 const CS = CELL_SIZE;
 const WH = WALL_HEIGHT;
@@ -14,13 +15,14 @@ const WH = WALL_HEIGHT;
  * @param {THREE.Scene} scene
  * @param {import('./index.js').MapGameplay} gp
  * @param {(scene: THREE.Scene, batches: object, materials: object) => void} mergeFn
+ * @param {{ skipPlacedAssets?: boolean }} [opts]
  */
-export function buildCustomMapScene(scene, gp, mergeFn) {
-  const theme = gp.theme ?? {};
-  const pal   = gp.sceneProfile?.palette ?? {};
-  scene.background = new THREE.Color(theme.sky ?? 0x8899aa);
-  scene.fog        = new THREE.FogExp2(theme.fog ?? 0x8899aa, theme.fogDensity ?? 0.016);
+export function buildCustomMapScene(scene, gp, mergeFn, opts = {}) {
+  if (!scene) return;
+  const theme = resolveMapTheme({ theme: gp.theme });
+  applySceneTheme(scene, theme);
 
+  const pal   = gp.sceneProfile?.palette ?? {};
   const w = gp.meta.width ?? 44;
   const h = gp.meta.height ?? 44;
   const mapW = w * CS;
@@ -54,11 +56,16 @@ export function buildCustomMapScene(scene, gp, mergeFn) {
 
   mergeFn(scene, batches, M);
 
+  if (opts.skipPlacedAssets) return;
+
   const assets = gp.customAssets ?? [];
   for (const a of assets) {
     if (a.type.startsWith('spawn_')) continue;
     const obj = buildMapAssetObject(a);
-    if (obj) scene.add(obj);
+    if (obj) {
+      obj.userData.customMapAsset = true;
+      scene.add(obj);
+    }
   }
 }
 
